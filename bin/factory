@@ -2,11 +2,12 @@
 """factory: the only writer of stage state.
 
 Stages, transitions and the agent rule live in this file (STAGES, TRANSITIONS,
-check_advance). Skills and hooks call this CLI; they never edit stage labels.
+check_advance). Skills and hooks call this CLI; they never edit the board.
+The stage of an issue is its Status on the GitHub Project of the foreman.
 
 Rule: an agent move needs a human event after the last agent move.
 Human events are directives (go, approve, verified, move, rework) and any stage
-change that factory did not make (for example a label change in the GitHub UI).
+change that factory did not make (for example a card that the owner drags on the board).
 """
 from __future__ import annotations
 
@@ -30,22 +31,20 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Stage:
     key: str
-    status: str  # GitHub Project option name, for a later board backend
-
-    @property
-    def label(self) -> str:
-        return f"stage:{self.key}"
+    status: str  # name of the Status option on the Project board
+    color: str  # color of that option
 
 
 STAGES = [
-    Stage("backlog", "Backlog"),
-    Stage("design", "In Design"),
-    Stage("ready", "Ready for Dev"),
-    Stage("dev", "In Dev"),
-    Stage("verify", "Waiting for Verification"),
-    Stage("done", "Done"),
+    Stage("backlog", "Backlog", "GRAY"),
+    Stage("design", "In Design", "BLUE"),
+    Stage("ready", "Ready for Dev", "PURPLE"),
+    Stage("dev", "In Dev", "YELLOW"),
+    Stage("verify", "Waiting for Verification", "ORANGE"),
+    Stage("done", "Done", "GREEN"),
 ]
 STAGE = {s.key: s for s in STAGES}
+STATUS_STAGE = {s.status: s.key for s in STAGES}
 
 
 @dataclass(frozen=True)
@@ -70,11 +69,7 @@ FLAGS = {
     "blocked": "The agent needs a human answer.",
     "rework": "The human gave feedback. The agent must revise.",
 }
-LABEL_COLORS = {
-    "backlog": "d4d4d4", "design": "c5def5", "ready": "bfd4f2",
-    "dev": "fbca04", "verify": "f9a03f", "done": "0e8a16",
-    "claimed": "5319e7", "blocked": "b60205", "rework": "d93f0b",
-}
+FLAG_COLORS = {"claimed": "5319e7", "blocked": "b60205", "rework": "d93f0b"}
 
 # Which WIP bucket an issue counts against, by stage.
 WIP_BUCKET = {"design": "design", "ready": "design", "dev": "dev", "verify": "dev"}
@@ -147,13 +142,6 @@ class UsageError(Exception):
     """Bad input or config. Exit code 2."""
 
 
-def current_stage(labels: list[str]) -> str:
-    found = [s.key for s in STAGES if s.label in labels]
-    if len(found) != 1:
-        raise Refusal(f"expected exactly one stage label, found {found or 'none'}; run `factory audit`")
-    return found[0]
-
-
 def check_advance(stage: str, events: list[Event]) -> Transition:
     """Return the transition an agent may make now, or raise Refusal."""
     t = TRANSITIONS.get(stage)
@@ -185,11 +173,11 @@ def claim_owner(events: list[Event]) -> str | None:
     return owner
 
 
-def next_action(stage: str, labels: list[str], events: list[Event]) -> str | None:
+def next_action(stage: str, flags: list[str], events: list[Event]) -> str | None:
     """The skill the tick must start for this issue, or None."""
-    if flag_label("claimed") in labels or flag_label("blocked") in labels:
+    if "claimed" in flags or "blocked" in flags:
         return None
-    if flag_label("rework") in labels:
+    if "rework" in flags:
         return "rework"
     if stage == "design":
         return "design"
@@ -234,6 +222,7 @@ class Foreman:
     prefix: str  # what the issue IDs start with: FACTORY-6. Default: the name.
     title: str
     github: str  # owner/repo of the issue tracker (the home repo)
+    project: int | None  # number of the GitHub Project (the board) of the same owner
     root: Path  # folder that holds foreman.toml
     repos: list[dict]
     wip: dict[str, int]
@@ -256,12 +245,15 @@ def load_foreman(path: Path) -> Foreman:
     github = data.get("github", "")
     if not re.match(r"^[\w.-]+/[\w.-]+$", github):
         raise UsageError(f"{path}: github must be owner/repo, got {github!r}")
+    project = data.get("project")
+    if project is not None and (not isinstance(project, int) or isinstance(project, bool) or project < 1):
+        raise UsageError(f"{path}: project must be the number of a GitHub Project, got {project!r}")
     root = path.parent.resolve()
     repos = []
     for r in data.get("repos", []):
         repos.append({**r, "path": str((root / r.get("path", ".")).resolve())})
     wip = {"design": 2, "dev": 3, **data.get("wip", {})}
-    return Foreman(name, prefix, data.get("title", name), github, root, repos, wip)
+    return Foreman(name, prefix, data.get("title", name), github, project, root, repos, wip)
 
 
 def registry_path() -> Path:
@@ -360,23 +352,63 @@ def resolve(text: str) -> tuple[Foreman, int]:
 
 
 class GhBackend:
-    """GitHub through the `gh` CLI. Labels hold the stage."""
+    """GitHub through the `gh` CLI. The Status field of the Project holds the stage; labels hold the flags."""
 
-    def __init__(self, repo: str):
-        self.repo = repo
+    def __init__(self, repo: str, project: int):
+        self.repo, self.number = repo, project
+        self.owner, self.name = repo.split("/")
+        self._board: dict | None = None
+        self._node: dict[int, str] = {}
+
+    def _run(self, cmd: list[str]) -> str:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise UsageError(f"gh failed: {' '.join(cmd)}\n{(r.stderr or r.stdout).strip()}")
+        return r.stdout
 
     def _api(self, path: str, *args: str, paginate: bool = False):
         cmd = ["gh", "api", f"repos/{self.repo}/{path}", *args]
         if paginate:
             cmd.insert(2, "--paginate")
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise UsageError(f"gh failed: {' '.join(cmd)}\n{r.stderr.strip()}")
-        return _parse_json_stream(r.stdout)
+        return _parse_json_stream(self._run(cmd))
+
+    def _gql(self, query: str, **variables) -> dict:
+        cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
+        for k, v in variables.items():
+            cmd += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
+        return json.loads(self._run(cmd))["data"]
+
+    def board(self) -> dict:
+        """The Project: its ID, the Status field, the options by name, the views, the linked repos."""
+        if self._board is None:
+            data = self._gql("""query($owner:String!,$number:Int!){ repositoryOwner(login:$owner){ ... on ProjectV2Owner {
+                projectV2(number:$number){ id url
+                  field(name:"Status"){ ... on ProjectV2SingleSelectField { id options { id name } } }
+                  views(first:20){ nodes { id name layout } }
+                  repositories(first:50){ nodes { nameWithOwner } } } } } }""", owner=self.owner, number=self.number)
+            pr = (data.get("repositoryOwner") or {}).get("projectV2")
+            if not pr or not pr.get("field"):
+                raise UsageError(f"{self.owner} has no Project {self.number} with a Status field")
+            self._board = {"id": pr["id"], "url": pr["url"], "field": pr["field"]["id"],
+                           "options": {o["name"]: o["id"] for o in pr["field"]["options"]},
+                           "views": pr["views"]["nodes"],
+                           "repos": [r["nameWithOwner"] for r in pr["repositories"]["nodes"]]}
+        return self._board
 
     def issue(self, n: int) -> dict:
-        data = self._api(f"issues/{n}")[0]
-        return {"title": data["title"], "state": data["state"], "labels": [l["name"] for l in data["labels"]]}
+        data = self._gql("""query($owner:String!,$name:String!,$n:Int!){ repository(owner:$owner,name:$name){
+            issue(number:$n){ id title state labels(first:50){ nodes { name } }
+              projectItems(first:20){ nodes { project { id }
+                fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } }""",
+                         owner=self.owner, name=self.name, n=n)
+        i = data["repository"]["issue"]
+        self._node[n] = i["id"]
+        board = self.board()["id"]
+        status = next(((item["fieldValueByName"] or {}).get("name") for item in i["projectItems"]["nodes"]
+                       if item["project"]["id"] == board), None)
+        labels = [l["name"] for l in i["labels"]["nodes"]]
+        return {"title": i["title"], "state": i["state"].lower(), "stage": STATUS_STAGE.get(status),
+                "flags": [f for f in FLAGS if flag_label(f) in labels]}
 
     def comments(self, n: int) -> list[str]:
         pages = self._api(f"issues/{n}/comments?per_page=100", paginate=True)
@@ -386,14 +418,27 @@ class GhBackend:
         pages = self._api("issues?state=open&per_page=100", paginate=True)
         return [i["number"] for page in pages for i in page if "pull_request" not in i]
 
-    def add_labels(self, n: int, labels: list[str]) -> None:
-        args = ["-X", "POST"]
-        for l in labels:
-            args += ["-f", f"labels[]={l}"]
-        self._api(f"issues/{n}/labels", *args)
+    def set_stage(self, n: int, stage: str) -> None:
+        """Put the issue on the board (no change if it is there) and set its Status."""
+        b = self.board()
+        option = b["options"].get(STAGE[stage].status)
+        if option is None:
+            raise UsageError(f"{b['url']} has no Status option {STAGE[stage].status!r}; run `factory setup`")
+        if n not in self._node:
+            self.issue(n)
+        item = self._gql("""mutation($project:ID!,$content:ID!){
+            addProjectV2ItemById(input:{projectId:$project,contentId:$content}){ item { id } } }""",
+                         project=b["id"], content=self._node[n])["addProjectV2ItemById"]["item"]["id"]
+        self._gql("""mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){
+            updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,
+              value:{singleSelectOptionId:$option}}){ projectV2Item { id } } }""",
+                  project=b["id"], item=item, field=b["field"], option=option)
 
-    def remove_label(self, n: int, label: str) -> None:
-        self._api(f"issues/{n}/labels/{urllib.parse.quote(label, safe='')}", "-X", "DELETE")
+    def set_flag(self, n: int, flag: str, on: bool) -> None:
+        if on:
+            self._api(f"issues/{n}/labels", "-X", "POST", "-f", f"labels[]={flag_label(flag)}")
+        else:
+            self._api(f"issues/{n}/labels/{urllib.parse.quote(flag_label(flag), safe='')}", "-X", "DELETE")
 
     def comment(self, n: int, body: str) -> None:
         self._api(f"issues/{n}/comments", "-X", "POST", "-f", f"body={body}")
@@ -401,18 +446,34 @@ class GhBackend:
     def set_state(self, n: int, state: str) -> None:
         self._api(f"issues/{n}", "-X", "PATCH", "-f", f"state={state}")
 
-    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
-        args = ["-X", "POST", "-f", f"title={title}", "-f", f"body={body}"]
-        for l in labels:
-            args += ["-f", f"labels[]={l}"]
-        return self._api("issues", *args)[0]["number"]
+    def create_issue(self, title: str, body: str) -> int:
+        return self._api("issues", "-X", "POST", "-f", f"title={title}", "-f", f"body={body}")[0]["number"]
 
-    def ensure_label(self, name: str, color: str, description: str) -> None:
-        cmd = ["gh", "label", "create", name, "--repo", self.repo, "--color", color,
-               "--description", description, "--force"]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise UsageError(f"gh failed: {' '.join(cmd)}\n{r.stderr.strip()}")
+    def setup(self) -> list[str]:
+        """Make the board ready: Status options, a Board view, the repo link, the flag labels. Idempotent."""
+        b, done = self.board(), []
+        if list(b["options"]) != [s.status for s in STAGES]:
+            options = ",".join(
+                "{" + (f"id:{json.dumps(b['options'][s.status])}," if s.status in b["options"] else "")
+                + f'name:{json.dumps(s.status)},color:{s.color},description:""' + "}" for s in STAGES)
+            self._gql("mutation($field:ID!){ updateProjectV2Field(input:{fieldId:$field,singleSelectOptions:[%s]}){"
+                      " projectV2Field { ... on ProjectV2SingleSelectField { id } } } }" % options, field=b["field"])
+            done.append("Status options set")
+        if not any(v["layout"] == "BOARD_LAYOUT" for v in b["views"]):
+            self._gql("""mutation($view:ID!){ updateProjectV2View(input:{viewId:$view,name:"Board",layout:BOARD_LAYOUT}){
+                projectV2View { id } } }""", view=b["views"][0]["id"])
+            done.append("Board view made")
+        if self.repo not in b["repos"]:
+            repo = self._gql("query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ id } }",
+                             owner=self.owner, name=self.name)["repository"]["id"]
+            self._gql("""mutation($project:ID!,$repo:ID!){ linkProjectV2ToRepository(input:{projectId:$project,
+                repositoryId:$repo}){ repository { id } } }""", project=b["id"], repo=repo)
+            done.append("repo linked")
+        for flag, desc in FLAGS.items():
+            self._run(["gh", "label", "create", flag_label(flag), "--repo", self.repo, "--color", FLAG_COLORS[flag],
+                       "--description", desc, "--force"])
+        self._board = None
+        return done
 
 
 def _parse_json_stream(text: str) -> list:
@@ -454,7 +515,7 @@ class FakeBackend:
 
     def issue(self, n: int) -> dict:
         i = self._get(n)
-        return {"title": i["title"], "state": i["state"], "labels": list(i["labels"])}
+        return {"title": i["title"], "state": i["state"], "stage": i["stage"], "flags": list(i["flags"])}
 
     def comments(self, n: int) -> list[str]:
         return list(self._get(n)["comments"])
@@ -462,12 +523,14 @@ class FakeBackend:
     def open_issues(self) -> list[int]:
         return sorted(int(k) for k, v in self._issues(self._load()).items() if v["state"] == "open")
 
-    def add_labels(self, n: int, labels: list[str]) -> None:
+    def set_stage(self, n: int, stage: str) -> None:
         self._get(n)
-        self._edit(lambda iss: iss[str(n)]["labels"].extend(l for l in labels if l not in iss[str(n)]["labels"]))
+        self._edit(lambda iss: iss[str(n)].__setitem__("stage", stage))
 
-    def remove_label(self, n: int, label: str) -> None:
-        self._edit(lambda iss: iss[str(n)]["labels"].remove(label) if label in iss[str(n)]["labels"] else None)
+    def set_flag(self, n: int, flag: str, on: bool) -> None:
+        self._get(n)
+        self._edit(lambda iss: iss[str(n)].__setitem__(
+            "flags", [f for f in FLAGS if (f in iss[str(n)]["flags"] and f != flag) or (f == flag and on)]))
 
     def comment(self, n: int, body: str) -> None:
         self._edit(lambda iss: iss[str(n)]["comments"].append(body))
@@ -475,17 +538,15 @@ class FakeBackend:
     def set_state(self, n: int, state: str) -> None:
         self._edit(lambda iss: iss[str(n)].__setitem__("state", state))
 
-    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+    def create_issue(self, title: str, body: str) -> int:
         def add(iss):
             n = max((int(k) for k in iss), default=0) + 1
-            iss[str(n)] = {"title": title, "body": body, "state": "open", "labels": list(labels), "comments": []}
+            iss[str(n)] = {"title": title, "body": body, "state": "open", "stage": None, "flags": [], "comments": []}
             return n
         return self._edit(add)
 
-    def ensure_label(self, name: str, color: str, description: str) -> None:
-        db = self._load()
-        db.setdefault(self.repo, {}).setdefault("labels", {})[name] = {"color": color, "description": description}
-        self.path.write_text(json.dumps(db, indent=2))
+    def setup(self) -> list[str]:
+        return []
 
 
 def backend_for(f: Foreman):
@@ -494,7 +555,9 @@ def backend_for(f: Foreman):
         return FakeBackend(f.github, Path(fake))
     if f.github.startswith("OWNER/"):
         raise UsageError(f"{f.root / 'foreman.toml'}: set github to the real owner/repo")
-    return GhBackend(f.github)
+    if f.project is None:
+        raise UsageError(f"{f.root / 'foreman.toml'}: set project to the number of the GitHub Project (the board)")
+    return GhBackend(f.github, f.project)
 
 
 # --------------------------------------------------------------------------
@@ -508,7 +571,8 @@ class IssueState:
     number: int
     title: str
     state: str
-    labels: list[str]
+    stage_key: str | None  # None: the issue is not on the board
+    flags: list[str]
     events: list[Event]
 
     @property
@@ -517,24 +581,20 @@ class IssueState:
 
     @property
     def stage(self) -> str:
-        return current_stage(self.labels)
-
-    @property
-    def flags(self) -> list[str]:
-        return [f for f in FLAGS if flag_label(f) in self.labels]
+        if self.stage_key is None:
+            raise Refusal(f"{self.id} has no stage: it is not on the board; a human must run "
+                          f"`factory move {self.id} backlog`")
+        return self.stage_key
 
 
 def read(f: Foreman, n: int, be=None) -> IssueState:
     be = be or backend_for(f)
     i = be.issue(n)
-    return IssueState(f, n, i["title"], i["state"], i["labels"], parse_events(be.comments(n)))
+    return IssueState(f, n, i["title"], i["state"], i["stage"], i["flags"], parse_events(be.comments(n)))
 
 
 def write_stage(be, s: IssueState, to: str, event: Event) -> None:
-    be.add_labels(s.number, [STAGE[to].label])
-    for st in STAGES:
-        if st.key != to and st.label in s.labels:
-            be.remove_label(s.number, st.label)
+    be.set_stage(s.number, to)
     be.comment(s.number, event.to_comment())
     if to == "done" and s.state != "closed":
         be.set_state(s.number, "closed")
@@ -576,11 +636,11 @@ def op_move(ref: str, to: str, note: str | None) -> str:
     f, n = resolve(ref)
     be = backend_for(f)
     s = read(f, n, be)
-    frm = s.stage
+    frm = s.stage_key
     if frm == to:
         return f"{s.id}: already in {STAGE[to].status}"
     write_stage(be, s, to, Event("human", "move", frm, to, note=note))
-    return f"{s.id}: {STAGE[frm].status} → {STAGE[to].status}"
+    return f"{s.id}: {STAGE[frm].status if frm else 'not on the board'} → {STAGE[to].status}"
 
 
 def op_flag(ref: str, flag: str, on: bool, actor: str, note: str | None) -> str:
@@ -589,13 +649,9 @@ def op_flag(ref: str, flag: str, on: bool, actor: str, note: str | None) -> str:
     f, n = resolve(ref)
     be = backend_for(f)
     s = read(f, n, be)
-    label = flag_label(flag)
-    if on == (label in s.labels):
+    if on == (flag in s.flags):
         return f"{s.id}: {flag} already {'set' if on else 'clear'}"
-    if on:
-        be.add_labels(n, [label])
-    else:
-        be.remove_label(n, label)
+    be.set_flag(n, flag, on)
     kind = flag if (on and flag == "rework") else ("flag" if on else "unflag")
     be.comment(n, Event(actor, kind, note=note or f"{flag} {'set' if on else 'cleared'}").to_comment())
     return f"{s.id}: {flag} {'set' if on else 'cleared'}"
@@ -606,11 +662,11 @@ def op_claim(ref: str, session: str) -> str:
     be = backend_for(f)
     s = read(f, n, be)
     owner = claim_owner(s.events)
-    if flag_label("claimed") in s.labels:
+    if "claimed" in s.flags:
         if owner == session:
             return f"{s.id}: already claimed by {session}"
         raise Refusal(f"{s.id} is claimed by {owner or 'an unknown session'}")
-    be.add_labels(n, [flag_label("claimed")])
+    be.set_flag(n, "claimed", True)
     be.comment(n, Event("agent", "claim", session=session).to_comment())
     return f"{s.id}: claimed by {session}"
 
@@ -619,16 +675,18 @@ def op_release(ref: str) -> str:
     f, n = resolve(ref)
     be = backend_for(f)
     s = read(f, n, be)
-    if flag_label("claimed") not in s.labels:
+    if "claimed" not in s.flags:
         return f"{s.id}: not claimed"
-    be.remove_label(n, flag_label("claimed"))
+    be.set_flag(n, "claimed", False)
     be.comment(n, Event("agent", "release", session=claim_owner(s.events)).to_comment())
     return f"{s.id}: released"
 
 
 def op_new(foreman: str | None, title: str, body: str) -> str:
     f = get_foreman(foreman)
-    n = backend_for(f).create_issue(title, body, [STAGE["backlog"].label])
+    be = backend_for(f)
+    n = be.create_issue(title, body)
+    be.set_stage(n, "backlog")
     return f"{f.ref(n)}: created in {STAGE['backlog'].status}"
 
 
@@ -639,7 +697,7 @@ def issue_summary(s: IssueState) -> dict:
         return {"id": s.id, "number": s.number, "title": s.title, "stage": None, "flags": s.flags,
                 "next_action": None, "error": str(e)}
     return {"id": s.id, "number": s.number, "title": s.title, "stage": stage, "flags": s.flags,
-            "next_action": next_action(stage, s.labels, s.events), "claimed_by": claim_owner(s.events)}
+            "next_action": next_action(stage, s.flags, s.events), "claimed_by": claim_owner(s.events)}
 
 
 def op_status(foreman: str | None) -> dict:
@@ -659,21 +717,19 @@ def op_audit(foreman: str | None) -> list[str]:
         try:
             s.stage
         except Refusal as e:
-            problems.append(f"{s.id}: {e}")
+            problems.append(str(e))
             continue
-        if flag_label("claimed") in s.labels and not claim_owner(s.events):
+        if "claimed" in s.flags and not claim_owner(s.events):
             problems.append(f"{s.id}: claimed label with no claim event")
+        if s.stage_key == "done" and s.state == "open":  # the list of open issues can be stale
+            problems.append(f"{s.id}: in Done but the issue is open; a human must close it or move it")
     return problems
 
 
-def op_labels(foreman: str | None) -> str:
+def op_setup(foreman: str | None) -> str:
     f = get_foreman(foreman)
-    be = backend_for(f)
-    for st in STAGES:
-        be.ensure_label(st.label, LABEL_COLORS[st.key], st.status)
-    for flag, desc in FLAGS.items():
-        be.ensure_label(flag_label(flag), LABEL_COLORS[flag], desc)
-    return f"{f.name}: {len(STAGES) + len(FLAGS)} labels ready on {f.github}"
+    done = backend_for(f).setup()
+    return f"{f.name}: the board and the flag labels are ready" + (f" ({', '.join(done)})" if done else "")
 
 
 # --------------------------------------------------------------------------
@@ -705,7 +761,10 @@ def format_status(st: dict) -> str:
 # Hook: the Claude Code PreToolUse guard (hooks/hooks.json)
 # --------------------------------------------------------------------------
 
-PROTECTED_RE = re.compile(r"\b(?:stage|factory):[a-z]")  # labels and the factory:event marker
+PROTECTED_RE = re.compile(r"\bfactory:[a-z]")  # the flag labels and the factory:event marker
+BOARD_WRITE_RE = re.compile(  # the board holds the stages: every Project write goes through factory
+    r"\bgh\s+project\s+(?!list\b|view\b|item-list\b|field-list\b)[a-z]"
+    r"|\bgh\s+api\s+graphql\b(?=.*\bmutation\b)(?=.*ProjectV2)", re.S | re.I)
 GH_WRITE_RE = re.compile(
     r"\bgh\s+(?:issue|pr)\s+(?:edit|create|comment)\b"
     r"|\bgh\s+label\s+(?:create|edit|delete|clone)\b"
@@ -731,8 +790,11 @@ def check_hook(data: dict, project_dir: str | None) -> None:
         return
     command = (data.get("tool_input") or {}).get("command") or ""
     if PROTECTED_RE.search(command) and GH_WRITE_RE.search(command):
-        raise Refusal("only the `factory` CLI writes `stage:*` labels, `factory:*` labels and "
-                      "`factory:event` markers; run `factory --help`")
+        raise Refusal("only the `factory` CLI writes `factory:*` labels and `factory:event` markers; "
+                      "run `factory --help`")
+    if BOARD_WRITE_RE.search(command):
+        raise Refusal("only the `factory` CLI writes the Project board, which holds the stages; "
+                      "run `factory --help`")
     m = HUMAN_CALL_RE.search(command)
     if m and data.get("agent_id"):
         raise Refusal(f"`factory {m[1]}` is a human command; a subagent cannot run it")
@@ -758,7 +820,7 @@ def run_hook(raw: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="factory", description="Factory stage state. The only writer of stage labels.")
+    p = argparse.ArgumentParser(prog="factory", description="Factory stage state. The only writer of the Project board.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("stages", help="print stages and transitions")
@@ -809,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("--body", default="")
     au = sub.add_parser("audit", help="find illegal states")
     au.add_argument("foreman", nargs="?")
-    lb = sub.add_parser("labels", help="create the stage and flag labels on GitHub (idempotent)")
+    lb = sub.add_parser("setup", help="make the Project board and the flag labels ready (idempotent)")
     lb.add_argument("foreman", nargs="?")
     sub.add_parser("hook", help="Claude Code PreToolUse guard: hook JSON on stdin, exit code 2 stops the call")
 
@@ -881,8 +943,8 @@ def dispatch(a) -> str | None:
             if problems:
                 raise Refusal("\n" + "\n".join(problems))
             return "no problems"
-        case "labels":
-            return op_labels(a.foreman)
+        case "setup":
+            return op_setup(a.foreman)
 
 
 if __name__ == "__main__":

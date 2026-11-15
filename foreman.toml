@@ -3,6 +3,7 @@ name = "fred"
 prefix = "factory"   # issue IDs: FACTORY-6
 title = "Factory"
 github = "christopherslee/factory"
+project = 1            # the board: https://github.com/users/christopherslee/projects/1
 
 [[repos]]
 name = "factory"

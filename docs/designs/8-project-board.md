@@ -26,8 +26,8 @@ The backend interface changes from labels to stages and flags. The operations do
 | `issue(n)` → `labels` | `issue(n)` → `stage` (one key or none) and `flags` |
 | `add_labels`, `remove_label` for stages | `set_stage(n, stage)` |
 | `add_labels`, `remove_label` for flags | `set_flag(n, flag, on)` |
-| `create_issue(title, body, labels)` | `create_issue(title, body)`: makes the issue, adds it to the Project, sets Backlog |
-| `ensure_label` and `factory labels` | `setup()` and `factory setup`: the six Status options and the three flag labels |
+| `create_issue(title, body, labels)` | `create_issue(title, body)`, then `set_stage(n, "backlog")`. `set_stage` puts the issue on the board if it is not there. |
+| `ensure_label` and `factory labels` | `setup()` and `factory setup`: the six Status options, the Board view, the repo link and the three flag labels |
 
 Status is a single-select field. Thus an issue with two stages is not possible, and that audit check goes away (*Type System Discipline*). The audit keeps one check: an open issue with no stage (not on the board).
 
@@ -62,8 +62,8 @@ An agent that edits the Status directly makes a false human move. `factory hook`
 ### Setup and migration
 
 1. The owner adds the `project` scope: `gh auth refresh -s project`.
-2. `factory setup fred` makes the Status options and the flag labels. It is idempotent.
-3. The owner makes the Project and its Board view one time in the GitHub UI. To be confirmed in dev: I believe the API cannot make a view.
+2. Make the Project one time (`gh project create --owner OWNER --title TITLE`) and set `project = N` in `foreman.toml`.
+3. `factory setup fred` makes the Status options, changes the first view to a Board view, links the repo and makes the flag labels. It is idempotent. Dev confirmed that the API can do all of this.
 4. One-time migration for this repo, by hand: add the issues to the Project with their stage, then delete the six `stage:*` labels. No migration code stays in the repo.
 
 FACTORY-8 itself moves between the stores. After the merge, the ship step sets it to Waiting for Verification on the board before the last `advance`.
@@ -82,7 +82,8 @@ FACTORY-8 itself moves between the stores. After the merge, the ship step sets i
 - A drag leaves no event marker. The history on the issue shows the agent moves and the directives only.
 - A drag to Done does not close the issue. `factory audit` reports an issue that is in Done and open.
 - An issue that someone makes in the GitHub UI is not on the board until `factory move N backlog`. The audit reports it.
-- To be confirmed in dev: the mutation that sets the options of the Status field.
+- A new Project is private. The owner decides if the board of a public repo becomes public.
+- The hook does not see a mutation that a command reads from a file.
 - Each foreman needs its own Project. A Project of a private foreman must be private.
 
 ## Proof

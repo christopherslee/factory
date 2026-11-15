@@ -7,7 +7,7 @@ Issue IDs use the form `CC-42`: the prefix, then the issue number of the home re
 
 ## The `factory` CLI
 
-`bin/factory` is the only writer of stage state. Stages are `stage:*` labels on the home repo issues.
+`bin/factory` is the only writer of stage state. The stage of an issue is its **Status** on the GitHub Project of the foreman (`project = N` in `foreman.toml`). That Project is the board. A card that the owner drags to a different column is a human move. The flags (`factory:claimed`, `factory:blocked`, `factory:rework`) are labels.
 
 ```
 factory stages                 # the stage table
@@ -20,7 +20,8 @@ factory rework REF "note"      # human: ask for a revision
 factory advance REF            # agent: one stage forward, if the rule permits
 factory claim REF SESSION | release REF | block REF "question" | reworked REF
 factory new "title" [--foreman cc]
-factory audit | labels [foreman]
+factory audit [foreman]        # find illegal states
+factory setup [foreman]        # make the Project board and the flag labels ready
 factory hook                   # Claude Code PreToolUse guard (hooks/hooks.json)
 ```
 
@@ -33,7 +34,7 @@ Set `FACTORY_FAKE=/path/state.json` to use a local JSON file in place of GitHub.
 ## Layout
 
 - `bin/factory` — CLI; all stage rules are in this file
-- `hooks/hooks.json` — runs `factory hook` before each Bash call: stops direct writes of `stage:*` and `factory:*` state, and stops human commands in work sessions (design: `docs/designs/2-hooks.md`)
+- `hooks/hooks.json` — runs `factory hook` before each Bash call: stops direct writes of the Project board and of `factory:*` state, and stops human commands in work sessions (design: `docs/designs/2-hooks.md`)
 - `skills/foreman/` — the skill that runs an owner directive such as `fred go 4`: records it, starts the work sessions and reports (design: `docs/designs/4-foreman-skill.md`)
 - `tests/` — behavior tests (`python3 -m unittest discover -s tests -v`)
 - `templates/home/` — template for a new foreman home repo
