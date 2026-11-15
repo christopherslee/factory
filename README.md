@@ -1,9 +1,9 @@
 # factory
 
 Claude Code plugin for a laptop-first software factory.
-This repo is also the home repo of foreman **fred** (named for Fred Flintstone). Its issues are `FRED-1`, `FRED-2`, and so on.
+This repo is also the home repo of foreman **fred** (named for Fred Flintstone). Its issues are `FACTORY-1`, `FACTORY-2`, and so on: the issue prefix is the project name, and `fred` is only the name of the foreman.
 Each project has a **foreman**: a home repo with `foreman.toml`, issues, docs, mockups and data.
-Issue IDs use the form `CC-42`.
+Issue IDs use the form `CC-42`: the prefix, then the issue number of the home repo. The prefix is the foreman name, or `prefix` in `foreman.toml` if it is set.
 
 ## The `factory` CLI
 

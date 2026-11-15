@@ -1,5 +1,6 @@
 # Foreman for the factory itself. This repo is its own home repo.
 name = "fred"
+prefix = "factory"   # issue IDs: FACTORY-6
 title = "Factory"
 github = "christopherslee/factory"
 
