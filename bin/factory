@@ -1,0 +1,818 @@
+#!/usr/bin/env python3
+"""factory: the only writer of stage state.
+
+Stages, transitions and the agent rule live in this file (STAGES, TRANSITIONS,
+check_advance). Skills and hooks call this CLI; they never edit stage labels.
+
+Rule: an agent move needs a human event after the last agent move.
+Human events are directives (go, approve, verified, move, rework) and any stage
+change that factory did not make (for example a label change in the GitHub UI).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tomllib
+import urllib.parse
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+# --------------------------------------------------------------------------
+# Domain: stages and transitions
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Stage:
+    key: str
+    status: str  # GitHub Project option name, for a later board backend
+
+    @property
+    def label(self) -> str:
+        return f"stage:{self.key}"
+
+
+STAGES = [
+    Stage("backlog", "Backlog"),
+    Stage("design", "In Design"),
+    Stage("ready", "Ready for Dev"),
+    Stage("dev", "In Dev"),
+    Stage("verify", "Waiting for Verification"),
+    Stage("done", "Done"),
+]
+STAGE = {s.key: s for s in STAGES}
+
+
+@dataclass(frozen=True)
+class Transition:
+    frm: str
+    to: str
+    by: str  # "human" or "agent"
+    directive: str | None = None  # human command that makes the move
+    requires: str | None = None  # human directive needed before an agent move
+
+
+TRANSITIONS = {
+    "backlog": Transition("backlog", "design", "human", directive="go"),
+    "design": Transition("design", "ready", "agent"),
+    "ready": Transition("ready", "dev", "human", directive="approve"),
+    "dev": Transition("dev", "verify", "agent"),
+    "verify": Transition("verify", "done", "agent", requires="verified"),
+}
+
+FLAGS = {
+    "claimed": "A session owns this issue.",
+    "blocked": "The agent needs a human answer.",
+    "rework": "The human gave feedback. The agent must revise.",
+}
+LABEL_COLORS = {
+    "backlog": "d4d4d4", "design": "c5def5", "ready": "bfd4f2",
+    "dev": "fbca04", "verify": "f9a03f", "done": "0e8a16",
+    "claimed": "5319e7", "blocked": "b60205", "rework": "d93f0b",
+}
+
+# Which WIP bucket an issue counts against, by stage.
+WIP_BUCKET = {"design": "design", "ready": "design", "dev": "dev", "verify": "dev"}
+
+
+def flag_label(flag: str) -> str:
+    return f"factory:{flag}"
+
+
+# --------------------------------------------------------------------------
+# Domain: events (hidden marker comments on the issue)
+# --------------------------------------------------------------------------
+
+MARKER_RE = re.compile(r"<!--\s*factory:event\s+(\{.*?\})\s*-->", re.S)
+
+
+@dataclass
+class Event:
+    actor: str  # "human" or "agent"
+    kind: str  # advance | go | approve | verified | move | rework | claim | release | flag | unflag
+    frm: str | None = None
+    to: str | None = None
+    session: str | None = None
+    note: str | None = None
+    at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+    def to_comment(self) -> str:
+        data = {k: v for k, v in self.__dict__.items() if v is not None}
+        return f"{self.summary()}\n\n<!-- factory:event {json.dumps(data, sort_keys=True)} -->"
+
+    def summary(self) -> str:
+        who = "🤖 agent" if self.actor == "agent" else "🧑 human"
+        if self.frm and self.to:
+            text = f"**{STAGE[self.frm].status} → {STAGE[self.to].status}** ({self.kind})"
+        else:
+            text = f"**{self.kind}**"
+        if self.session:
+            text += f" · session `{self.session}`"
+        if self.note:
+            text += f"\n\n{self.note}"
+        return f"factory · {who}: {text}"
+
+
+def parse_events(comments: list[str]) -> list[Event]:
+    events = []
+    for body in comments:
+        for m in MARKER_RE.finditer(body or ""):
+            try:
+                data = json.loads(m.group(1))
+                events.append(Event(**data))
+            except (ValueError, TypeError):
+                continue  # a malformed marker is not an event
+    return events
+
+
+# --------------------------------------------------------------------------
+# Domain: pure rules
+# --------------------------------------------------------------------------
+
+
+class Refusal(Exception):
+    """A rule says no. Exit code 1."""
+
+
+class UsageError(Exception):
+    """Bad input or config. Exit code 2."""
+
+
+def current_stage(labels: list[str]) -> str:
+    found = [s.key for s in STAGES if s.label in labels]
+    if len(found) != 1:
+        raise Refusal(f"expected exactly one stage label, found {found or 'none'}; run `factory audit`")
+    return found[0]
+
+
+def check_advance(stage: str, events: list[Event]) -> Transition:
+    """Return the transition an agent may make now, or raise Refusal."""
+    t = TRANSITIONS.get(stage)
+    if t is None:
+        raise Refusal(f"{STAGE[stage].status} is the last stage")
+    if t.by != "agent":
+        raise Refusal(f"{STAGE[t.frm].status} → {STAGE[t.to].status} is a human move (`factory {t.directive}`)")
+
+    agent_idx = [i for i, e in enumerate(events) if e.actor == "agent" and e.kind == "advance"]
+    last = agent_idx[-1] if agent_idx else -1
+    humans_after = [e for e in events[last + 1:] if e.actor == "human"]
+    moved_outside_factory = last >= 0 and events[last].to != stage
+    human_acted = last < 0 or bool(humans_after) or moved_outside_factory
+
+    if not human_acted:
+        raise Refusal("the last move was an agent move; a human event must come first")
+    if t.requires and not any(e.kind == t.requires for e in humans_after):
+        raise Refusal(f"{STAGE[t.frm].status} → {STAGE[t.to].status} needs the human directive `{t.requires}`")
+    return t
+
+
+def claim_owner(events: list[Event]) -> str | None:
+    owner = None
+    for e in events:
+        if e.kind == "claim":
+            owner = e.session
+        elif e.kind == "release":
+            owner = None
+    return owner
+
+
+def next_action(stage: str, labels: list[str], events: list[Event]) -> str | None:
+    """The skill the tick must start for this issue, or None."""
+    if flag_label("claimed") in labels or flag_label("blocked") in labels:
+        return None
+    if flag_label("rework") in labels:
+        return "rework"
+    if stage == "design":
+        return "design"
+    if stage == "dev":
+        return "develop"
+    if stage == "verify":
+        try:
+            check_advance(stage, events)
+            return "ship"
+        except Refusal:
+            return None
+    return None
+
+
+def plan_starts(issues: list[dict], wip: dict[str, int]) -> list[str]:
+    """IDs to start now, oldest issue first, inside the WIP limits."""
+    active = {b: 0 for b in wip}
+    for i in issues:
+        bucket = WIP_BUCKET.get(i["stage"])
+        if bucket and "claimed" in i["flags"]:
+            active[bucket] = active.get(bucket, 0) + 1
+    starts = []
+    for i in sorted(issues, key=lambda i: i["number"]):
+        bucket = WIP_BUCKET.get(i["stage"])
+        if i["next_action"] and bucket and active.get(bucket, 0) < wip.get(bucket, 0):
+            active[bucket] += 1
+            starts.append(i["id"])
+    return starts
+
+
+# --------------------------------------------------------------------------
+# Foremen and issue references
+# --------------------------------------------------------------------------
+
+NAME_RE = re.compile(r"^[a-z][a-z0-9]{1,7}$")
+REF_RE = re.compile(r"^\s*(?:([a-z][a-z0-9]{1,7})\s*[\s#-]\s*)?(\d+)\s*$", re.I)
+
+
+@dataclass
+class Foreman:
+    name: str
+    title: str
+    github: str  # owner/repo of the issue tracker (the home repo)
+    root: Path  # folder that holds foreman.toml
+    repos: list[dict]
+    wip: dict[str, int]
+
+    def ref(self, number: int) -> str:
+        return f"{self.name.upper()}-{number}"
+
+
+def load_foreman(path: Path) -> Foreman:
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise UsageError(f"{path}: {e}") from e
+    name = data.get("name", "")
+    if not NAME_RE.match(name):
+        raise UsageError(f"{path}: name {name!r} must be 2-8 lowercase letters or digits, first a letter")
+    github = data.get("github", "")
+    if not re.match(r"^[\w.-]+/[\w.-]+$", github):
+        raise UsageError(f"{path}: github must be owner/repo, got {github!r}")
+    root = path.parent.resolve()
+    repos = []
+    for r in data.get("repos", []):
+        repos.append({**r, "path": str((root / r.get("path", ".")).resolve())})
+    wip = {"design": 2, "dev": 3, **data.get("wip", {})}
+    return Foreman(name, data.get("title", name), github, root, repos, wip)
+
+
+def registry_path() -> Path:
+    env = os.environ.get("FACTORY_REGISTRY")
+    return Path(env).expanduser() if env else Path.home() / ".config" / "factory" / "foremen.toml"
+
+
+def read_registry() -> dict[str, Path]:
+    """foremen.toml: one line per foreman, `name = "path to home repo"`."""
+    path = registry_path()
+    if not path.exists():
+        return {}
+    try:
+        data = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError as e:
+        raise UsageError(f"{path}: {e}") from e
+    return {name: Path(home).expanduser() for name, home in data.items()}
+
+
+def write_registry(entries: dict[str, Path]) -> None:
+    home = str(Path.home())
+    lines = ["# Foreman registry: name = home repo folder. Edit with `factory register`.\n"]
+    for name in sorted(entries):
+        p = str(entries[name])
+        p = "~" + p[len(home):] if p.startswith(home + os.sep) else p
+        lines.append(f'{name} = "{p}"\n')
+    registry_path().parent.mkdir(parents=True, exist_ok=True)
+    registry_path().write_text("".join(lines))
+
+
+def load_registered(name: str, home: Path) -> Foreman:
+    path = home / "foreman.toml"
+    if not path.is_file():
+        raise UsageError(f"foreman {name!r}: {path} does not exist; fix {registry_path()}")
+    f = load_foreman(path)
+    if f.name != name:
+        raise UsageError(f"{registry_path()} says {name!r} but {path} says {f.name!r}")
+    return f
+
+
+def all_foremen() -> dict[str, Foreman]:
+    return {n: load_registered(n, h) for n, h in read_registry().items()}
+
+
+def get_foreman(name: str | None) -> Foreman:
+    reg = read_registry()
+    if name:
+        name = name.lower()
+        if name not in reg:
+            raise UsageError(f"no foreman named {name!r}; known: {', '.join(sorted(reg)) or 'none'}")
+        return load_registered(name, reg[name])
+    here = Path.cwd().resolve()
+    for d in [here, *here.parents]:
+        if (d / "foreman.toml").is_file():
+            f = load_foreman(d / "foreman.toml")
+            if f.name not in reg:
+                raise UsageError(f"foreman {f.name!r} is not registered; run `factory register {d}`")
+            return load_registered(f.name, reg[f.name])
+    if len(reg) == 1:
+        (n, h), = reg.items()
+        return load_registered(n, h)
+    raise UsageError("no foreman here; give a name, for example `cc`")
+
+
+def op_register(folder: str) -> str:
+    home = Path(folder).expanduser().resolve()
+    f = load_foreman(home / "foreman.toml")
+    reg = read_registry()
+    old = reg.get(f.name)
+    if old is not None and old.resolve() == home:
+        return f"{f.name}: already registered at {home}"
+    if old is not None:
+        raise Refusal(f"{f.name!r} is already registered at {old}; use another name or edit {registry_path()}")
+    for n, h in reg.items():
+        if h.resolve() == home:
+            raise Refusal(f"{home} is already registered as {n!r}")
+    reg[f.name] = home
+    write_registry(reg)
+    return f"{f.name}: registered at {home}"
+
+
+def resolve(text: str) -> tuple[Foreman, int]:
+    m = REF_RE.match(text)
+    if not m:
+        raise UsageError(f"{text!r} is not an issue reference; use CC-42, cc#42, cc 42 or 42")
+    return get_foreman(m.group(1)), int(m.group(2))
+
+
+# --------------------------------------------------------------------------
+# Backends (the only code that touches storage)
+# --------------------------------------------------------------------------
+
+
+class GhBackend:
+    """GitHub through the `gh` CLI. Labels hold the stage."""
+
+    def __init__(self, repo: str):
+        self.repo = repo
+
+    def _api(self, path: str, *args: str, paginate: bool = False):
+        cmd = ["gh", "api", f"repos/{self.repo}/{path}", *args]
+        if paginate:
+            cmd.insert(2, "--paginate")
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise UsageError(f"gh failed: {' '.join(cmd)}\n{r.stderr.strip()}")
+        return _parse_json_stream(r.stdout)
+
+    def issue(self, n: int) -> dict:
+        data = self._api(f"issues/{n}")[0]
+        return {"title": data["title"], "state": data["state"], "labels": [l["name"] for l in data["labels"]]}
+
+    def comments(self, n: int) -> list[str]:
+        pages = self._api(f"issues/{n}/comments?per_page=100", paginate=True)
+        return [c["body"] for page in pages for c in page]
+
+    def open_issues(self) -> list[int]:
+        pages = self._api("issues?state=open&per_page=100", paginate=True)
+        return [i["number"] for page in pages for i in page if "pull_request" not in i]
+
+    def add_labels(self, n: int, labels: list[str]) -> None:
+        args = ["-X", "POST"]
+        for l in labels:
+            args += ["-f", f"labels[]={l}"]
+        self._api(f"issues/{n}/labels", *args)
+
+    def remove_label(self, n: int, label: str) -> None:
+        self._api(f"issues/{n}/labels/{urllib.parse.quote(label, safe='')}", "-X", "DELETE")
+
+    def comment(self, n: int, body: str) -> None:
+        self._api(f"issues/{n}/comments", "-X", "POST", "-f", f"body={body}")
+
+    def set_state(self, n: int, state: str) -> None:
+        self._api(f"issues/{n}", "-X", "PATCH", "-f", f"state={state}")
+
+    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        args = ["-X", "POST", "-f", f"title={title}", "-f", f"body={body}"]
+        for l in labels:
+            args += ["-f", f"labels[]={l}"]
+        return self._api("issues", *args)[0]["number"]
+
+    def ensure_label(self, name: str, color: str, description: str) -> None:
+        cmd = ["gh", "label", "create", name, "--repo", self.repo, "--color", color,
+               "--description", description, "--force"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise UsageError(f"gh failed: {' '.join(cmd)}\n{r.stderr.strip()}")
+
+
+def _parse_json_stream(text: str) -> list:
+    """`gh api --paginate` prints one JSON value per page."""
+    dec, out, i = json.JSONDecoder(), [], 0
+    while i < len(text):
+        if text[i].isspace():
+            i += 1
+            continue
+        value, i = dec.raw_decode(text, i)
+        out.append(value)
+    return out
+
+
+class FakeBackend:
+    """A JSON file that acts as GitHub, for tests and dry runs (FACTORY_FAKE=path)."""
+
+    def __init__(self, repo: str, path: Path):
+        self.repo, self.path = repo, path
+
+    def _load(self) -> dict:
+        db = json.loads(self.path.read_text()) if self.path.exists() else {}
+        return db
+
+    def _issues(self, db: dict) -> dict:
+        return db.setdefault(self.repo, {}).setdefault("issues", {})
+
+    def _edit(self, fn):
+        db = self._load()
+        result = fn(self._issues(db))
+        self.path.write_text(json.dumps(db, indent=2))
+        return result
+
+    def _get(self, n: int) -> dict:
+        issue = self._issues(self._load()).get(str(n))
+        if issue is None:
+            raise UsageError(f"{self.repo}#{n} does not exist")
+        return issue
+
+    def issue(self, n: int) -> dict:
+        i = self._get(n)
+        return {"title": i["title"], "state": i["state"], "labels": list(i["labels"])}
+
+    def comments(self, n: int) -> list[str]:
+        return list(self._get(n)["comments"])
+
+    def open_issues(self) -> list[int]:
+        return sorted(int(k) for k, v in self._issues(self._load()).items() if v["state"] == "open")
+
+    def add_labels(self, n: int, labels: list[str]) -> None:
+        self._get(n)
+        self._edit(lambda iss: iss[str(n)]["labels"].extend(l for l in labels if l not in iss[str(n)]["labels"]))
+
+    def remove_label(self, n: int, label: str) -> None:
+        self._edit(lambda iss: iss[str(n)]["labels"].remove(label) if label in iss[str(n)]["labels"] else None)
+
+    def comment(self, n: int, body: str) -> None:
+        self._edit(lambda iss: iss[str(n)]["comments"].append(body))
+
+    def set_state(self, n: int, state: str) -> None:
+        self._edit(lambda iss: iss[str(n)].__setitem__("state", state))
+
+    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        def add(iss):
+            n = max((int(k) for k in iss), default=0) + 1
+            iss[str(n)] = {"title": title, "body": body, "state": "open", "labels": list(labels), "comments": []}
+            return n
+        return self._edit(add)
+
+    def ensure_label(self, name: str, color: str, description: str) -> None:
+        db = self._load()
+        db.setdefault(self.repo, {}).setdefault("labels", {})[name] = {"color": color, "description": description}
+        self.path.write_text(json.dumps(db, indent=2))
+
+
+def backend_for(f: Foreman):
+    fake = os.environ.get("FACTORY_FAKE")
+    if fake:
+        return FakeBackend(f.github, Path(fake))
+    if f.github.startswith("OWNER/"):
+        raise UsageError(f"{f.root / 'foreman.toml'}: set github to the real owner/repo")
+    return GhBackend(f.github)
+
+
+# --------------------------------------------------------------------------
+# Operations (read state, apply a pure rule, write)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class IssueState:
+    foreman: Foreman
+    number: int
+    title: str
+    state: str
+    labels: list[str]
+    events: list[Event]
+
+    @property
+    def id(self) -> str:
+        return self.foreman.ref(self.number)
+
+    @property
+    def stage(self) -> str:
+        return current_stage(self.labels)
+
+    @property
+    def flags(self) -> list[str]:
+        return [f for f in FLAGS if flag_label(f) in self.labels]
+
+
+def read(f: Foreman, n: int, be=None) -> IssueState:
+    be = be or backend_for(f)
+    i = be.issue(n)
+    return IssueState(f, n, i["title"], i["state"], i["labels"], parse_events(be.comments(n)))
+
+
+def write_stage(be, s: IssueState, to: str, event: Event) -> None:
+    be.add_labels(s.number, [STAGE[to].label])
+    for st in STAGES:
+        if st.key != to and st.label in s.labels:
+            be.remove_label(s.number, st.label)
+    be.comment(s.number, event.to_comment())
+    if to == "done" and s.state != "closed":
+        be.set_state(s.number, "closed")
+    elif to != "done" and s.state == "closed":
+        be.set_state(s.number, "open")
+
+
+def op_advance(ref: str, session: str | None) -> str:
+    f, n = resolve(ref)
+    be = backend_for(f)
+    s = read(f, n, be)
+    t = check_advance(s.stage, s.events)
+    write_stage(be, s, t.to, Event("agent", "advance", t.frm, t.to, session=session))
+    return f"{s.id}: {STAGE[t.frm].status} → {STAGE[t.to].status}"
+
+
+def op_directive(ref: str, directive: str, note: str | None) -> str:
+    f, n = resolve(ref)
+    be = backend_for(f)
+    s = read(f, n, be)
+    stage = s.stage
+    if directive == "verified":
+        if stage != "verify":
+            raise Refusal(f"{s.id} is in {STAGE[stage].status}; `verified` needs {STAGE['verify'].status}")
+        be.comment(n, Event("human", "verified", note=note).to_comment())
+        return f"{s.id}: verified; the agent can now merge, test and close"
+    t = next((t for t in TRANSITIONS.values() if t.directive == directive), None)
+    if t is None:
+        raise UsageError(f"unknown directive {directive!r}")
+    if stage != t.frm:
+        raise Refusal(f"{s.id} is in {STAGE[stage].status}; `{directive}` needs {STAGE[t.frm].status}")
+    write_stage(be, s, t.to, Event("human", directive, t.frm, t.to, note=note))
+    return f"{s.id}: {STAGE[t.frm].status} → {STAGE[t.to].status}"
+
+
+def op_move(ref: str, to: str, note: str | None) -> str:
+    if to not in STAGE:
+        raise UsageError(f"unknown stage {to!r}; use one of {', '.join(STAGE)}")
+    f, n = resolve(ref)
+    be = backend_for(f)
+    s = read(f, n, be)
+    frm = s.stage
+    if frm == to:
+        return f"{s.id}: already in {STAGE[to].status}"
+    write_stage(be, s, to, Event("human", "move", frm, to, note=note))
+    return f"{s.id}: {STAGE[frm].status} → {STAGE[to].status}"
+
+
+def op_flag(ref: str, flag: str, on: bool, actor: str, note: str | None) -> str:
+    if flag not in FLAGS or flag == "claimed":
+        raise UsageError(f"unknown flag {flag!r}; use blocked or rework (claims use `factory claim`)")
+    f, n = resolve(ref)
+    be = backend_for(f)
+    s = read(f, n, be)
+    label = flag_label(flag)
+    if on == (label in s.labels):
+        return f"{s.id}: {flag} already {'set' if on else 'clear'}"
+    if on:
+        be.add_labels(n, [label])
+    else:
+        be.remove_label(n, label)
+    kind = flag if (on and flag == "rework") else ("flag" if on else "unflag")
+    be.comment(n, Event(actor, kind, note=note or f"{flag} {'set' if on else 'cleared'}").to_comment())
+    return f"{s.id}: {flag} {'set' if on else 'cleared'}"
+
+
+def op_claim(ref: str, session: str) -> str:
+    f, n = resolve(ref)
+    be = backend_for(f)
+    s = read(f, n, be)
+    owner = claim_owner(s.events)
+    if flag_label("claimed") in s.labels:
+        if owner == session:
+            return f"{s.id}: already claimed by {session}"
+        raise Refusal(f"{s.id} is claimed by {owner or 'an unknown session'}")
+    be.add_labels(n, [flag_label("claimed")])
+    be.comment(n, Event("agent", "claim", session=session).to_comment())
+    return f"{s.id}: claimed by {session}"
+
+
+def op_release(ref: str) -> str:
+    f, n = resolve(ref)
+    be = backend_for(f)
+    s = read(f, n, be)
+    if flag_label("claimed") not in s.labels:
+        return f"{s.id}: not claimed"
+    be.remove_label(n, flag_label("claimed"))
+    be.comment(n, Event("agent", "release", session=claim_owner(s.events)).to_comment())
+    return f"{s.id}: released"
+
+
+def op_new(foreman: str | None, title: str, body: str) -> str:
+    f = get_foreman(foreman)
+    n = backend_for(f).create_issue(title, body, [STAGE["backlog"].label])
+    return f"{f.ref(n)}: created in {STAGE['backlog'].status}"
+
+
+def issue_summary(s: IssueState) -> dict:
+    try:
+        stage = s.stage
+    except Refusal as e:
+        return {"id": s.id, "number": s.number, "title": s.title, "stage": None, "flags": s.flags,
+                "next_action": None, "error": str(e)}
+    return {"id": s.id, "number": s.number, "title": s.title, "stage": stage, "flags": s.flags,
+            "next_action": next_action(stage, s.labels, s.events), "claimed_by": claim_owner(s.events)}
+
+
+def op_status(foreman: str | None) -> dict:
+    f = get_foreman(foreman)
+    be = backend_for(f)
+    issues = [issue_summary(read(f, n, be)) for n in be.open_issues()]
+    return {"foreman": f.name, "github": f.github, "repos": f.repos, "wip": f.wip,
+            "issues": issues, "start": plan_starts(issues, f.wip)}
+
+
+def op_audit(foreman: str | None) -> list[str]:
+    f = get_foreman(foreman)
+    be = backend_for(f)
+    problems = []
+    for n in be.open_issues():
+        s = read(f, n, be)
+        try:
+            s.stage
+        except Refusal as e:
+            problems.append(f"{s.id}: {e}")
+            continue
+        if flag_label("claimed") in s.labels and not claim_owner(s.events):
+            problems.append(f"{s.id}: claimed label with no claim event")
+    return problems
+
+
+def op_labels(foreman: str | None) -> str:
+    f = get_foreman(foreman)
+    be = backend_for(f)
+    for st in STAGES:
+        be.ensure_label(st.label, LABEL_COLORS[st.key], st.status)
+    for flag, desc in FLAGS.items():
+        be.ensure_label(flag_label(flag), LABEL_COLORS[flag], desc)
+    return f"{f.name}: {len(STAGES) + len(FLAGS)} labels ready on {f.github}"
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+
+def format_status(st: dict) -> str:
+    lines = [f"{st['foreman']} ({st['github']})"]
+    by_stage: dict[str | None, list[dict]] = {}
+    for i in st["issues"]:
+        by_stage.setdefault(i["stage"], []).append(i)
+    for s in [*STAGES, None]:
+        key = s.key if s else None
+        items = by_stage.get(key, [])
+        if not items:
+            continue
+        lines.append(f"\n{s.status if s else 'Problems'}")
+        for i in items:
+            extra = " ".join(f"[{f}]" for f in i["flags"])
+            action = f" → {i['next_action']}" if i["next_action"] else ""
+            err = f"  ! {i['error']}" if i.get("error") else ""
+            lines.append(f"  {i['id']:<10} {i['title']} {extra}{action}{err}".rstrip())
+    lines.append(f"\nstart now: {', '.join(st['start']) or 'nothing'}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="factory", description="Factory stage state. The only writer of stage labels.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("stages", help="print stages and transitions")
+    sub.add_parser("foremen", help="list registered foremen (foremen.toml)")
+    rg = sub.add_parser("register", help="add a home repo folder to foremen.toml")
+    rg.add_argument("folder")
+    r = sub.add_parser("resolve", help="turn CC-42, cc#42, 'cc 42' or 42 into a canonical ID")
+    r.add_argument("ref")
+    s = sub.add_parser("status", help="issues by stage, and what the tick must start")
+    s.add_argument("foreman", nargs="?")
+    s.add_argument("--json", action="store_true")
+    sh = sub.add_parser("show", help="one issue with its events")
+    sh.add_argument("ref")
+
+    a = sub.add_parser("advance", help="AGENT: move one stage forward if the rule permits")
+    a.add_argument("ref")
+    a.add_argument("--session")
+    c = sub.add_parser("claim", help="AGENT: mark that a session owns the issue")
+    c.add_argument("ref")
+    c.add_argument("session")
+    rl = sub.add_parser("release", help="AGENT: remove the claim")
+    rl.add_argument("ref")
+    b = sub.add_parser("block", help="AGENT: set blocked, with the question")
+    b.add_argument("ref")
+    b.add_argument("note")
+    rd = sub.add_parser("reworked", help="AGENT: clear rework after the revision")
+    rd.add_argument("ref")
+
+    for d, h in [("go", "Backlog → In Design"), ("approve", "Ready for Dev → In Dev"),
+                 ("verified", "permit the agent to merge, test and close")]:
+        x = sub.add_parser(d, help=f"HUMAN: {h}")
+        x.add_argument("ref")
+        x.add_argument("--note")
+    m = sub.add_parser("move", help="HUMAN: move to any stage")
+    m.add_argument("ref")
+    m.add_argument("stage")
+    m.add_argument("--note")
+    rw = sub.add_parser("rework", help="HUMAN: ask for a revision")
+    rw.add_argument("ref")
+    rw.add_argument("note")
+    ub = sub.add_parser("unblock", help="HUMAN: clear blocked after you answer")
+    ub.add_argument("ref")
+    ub.add_argument("--note")
+
+    n = sub.add_parser("new", help="create an issue in Backlog")
+    n.add_argument("title")
+    n.add_argument("--foreman")
+    n.add_argument("--body", default="")
+    au = sub.add_parser("audit", help="find illegal states")
+    au.add_argument("foreman", nargs="?")
+    lb = sub.add_parser("labels", help="create the stage and flag labels on GitHub (idempotent)")
+    lb.add_argument("foreman", nargs="?")
+
+    args = p.parse_args(argv)
+    try:
+        out = dispatch(args)
+    except Refusal as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 1
+    except UsageError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if out is not None:
+        print(out)
+    return 0
+
+
+def dispatch(a) -> str | None:
+    match a.cmd:
+        case "stages":
+            rows = []
+            for st in STAGES:
+                t = TRANSITIONS.get(st.key)
+                if t:
+                    how = f"human `factory {t.directive}`" if t.by == "human" else "agent `factory advance`"
+                    if t.requires:
+                        how += f" after human `factory {t.requires}`"
+                    rows.append(f"{st.status:<26} → {STAGE[t.to].status:<26} {how}")
+            return "\n".join(rows)
+        case "foremen":
+            fs = all_foremen()
+            return "\n".join(f"{f.name:<8} {f.github:<30} {f.root}" for f in fs.values()) or "no foremen"
+        case "register":
+            return op_register(a.folder)
+        case "resolve":
+            f, num = resolve(a.ref)
+            return json.dumps({"id": f.ref(num), "foreman": f.name, "github": f.github, "number": num})
+        case "status":
+            st = op_status(a.foreman)
+            return json.dumps(st, indent=2) if a.json else format_status(st)
+        case "show":
+            f, num = resolve(a.ref)
+            s = read(f, num)
+            return json.dumps({**issue_summary(s), "events": [e.__dict__ for e in s.events]}, indent=2)
+        case "advance":
+            return op_advance(a.ref, a.session)
+        case "claim":
+            return op_claim(a.ref, a.session)
+        case "release":
+            return op_release(a.ref)
+        case "block":
+            return op_flag(a.ref, "blocked", True, "agent", a.note)
+        case "reworked":
+            return op_flag(a.ref, "rework", False, "agent", None)
+        case "go" | "approve" | "verified":
+            return op_directive(a.ref, a.cmd, a.note)
+        case "move":
+            return op_move(a.ref, a.stage, a.note)
+        case "rework":
+            return op_flag(a.ref, "rework", True, "human", a.note)
+        case "unblock":
+            return op_flag(a.ref, "blocked", False, "human", a.note)
+        case "new":
+            return op_new(a.foreman, a.title, a.body)
+        case "audit":
+            problems = op_audit(a.foreman)
+            if problems:
+                raise Refusal("\n" + "\n".join(problems))
+            return "no problems"
+        case "labels":
+            return op_labels(a.foreman)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

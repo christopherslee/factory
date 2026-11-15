@@ -1,0 +1,12 @@
+# Foreman for the factory itself. This repo is its own home repo.
+name = "fred"
+title = "Factory"
+github = "christopherslee/factory"
+
+[[repos]]
+name = "factory"
+path = "."
+
+[wip]
+design = 1
+dev = 2
