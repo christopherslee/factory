@@ -48,7 +48,7 @@ No new rule is necessary. `check_advance` already reads a stage that the last ag
 | Backlog → In Design | The same as `go` |
 | Ready for Dev → In Dev | The same as `approve` |
 | A move back | The same as `move`; the agent can move again |
-| Waiting for Verification → Done | The owner closes the issue by hand. The agent does not merge. |
+| Waiting for Verification → Done | The owner ends the issue by hand, and GitHub closes it. The agent does not merge. |
 
 `verified` is not a stage. The owner still says `fred verified N`.
 
@@ -80,7 +80,7 @@ FACTORY-8 itself moves between the stores. After the merge, the ship step sets i
 
 - A drag does not start a work session, because no Claude turn runs. The work starts at the owner's next message to the foreman.
 - A drag leaves no event marker. The history on the issue shows the agent moves and the directives only.
-- A drag to Done does not close the issue. `factory audit` reports an issue that is in Done and open.
+- A drag to Done closes the issue: the built-in workflow "Auto-close issue" does it (corrected in FACTORY-11).
 - An issue that someone makes in the GitHub UI is not on the board until `factory move N backlog`. The audit reports it.
 - A new Project is private. The owner decides if the board of a public repo becomes public.
 - The hook does not see a mutation that a command reads from a file.
