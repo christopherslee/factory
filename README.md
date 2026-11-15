@@ -21,6 +21,7 @@ factory advance REF            # agent: one stage forward, if the rule permits
 factory claim REF SESSION | release REF | block REF "question" | reworked REF
 factory new "title" [--foreman cc]
 factory audit | labels [foreman]
+factory hook                   # Claude Code PreToolUse guard (hooks/hooks.json)
 ```
 
 REF can be `CC-42`, `cc#42`, `"cc 42"`, or `42` inside a foreman folder.
@@ -32,6 +33,7 @@ Set `FACTORY_FAKE=/path/state.json` to use a local JSON file in place of GitHub.
 ## Layout
 
 - `bin/factory` — CLI; all stage rules are in this file
+- `hooks/hooks.json` — runs `factory hook` before each Bash call: stops direct writes of `stage:*` and `factory:*` state, and stops human commands in work sessions (design: `docs/designs/2-hooks.md`)
 - `tests/` — behavior tests (`python3 -m unittest discover -s tests -v`)
 - `templates/home/` — template for a new foreman home repo
 - `foreman.toml` — config of foreman `fred` (this repo)

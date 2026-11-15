@@ -230,5 +230,118 @@ class TestRefs(FactoryCase):
         self.assertIn("set github to the real owner/repo", r.stderr)
 
 
+class TestHook(unittest.TestCase):
+    """Call `factory hook` as Claude Code does: PreToolUse JSON on stdin, exit code 2 stops the call."""
+
+    WRITE = ("factory hook: only the `factory` CLI writes `stage:*` labels, `factory:*` labels and "
+             "`factory:event` markers; run `factory --help`")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name).resolve()
+        cls.main, cls.worktree = root / "main", root / "wt"
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run([*git, "init", "-q", str(cls.main)], check=True)
+        subprocess.run([*git, "-C", str(cls.main), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        subprocess.run([*git, "-C", str(cls.main), "worktree", "add", "-q", str(cls.worktree)], check=True)
+        (cls.worktree / "src").mkdir()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def hook(self, command, folder=None, project_dir=None, stdin=None, **extra):
+        folder = folder or self.main
+        data = {"session_id": "s1", "hook_event_name": "PreToolUse", "cwd": str(folder),
+                "tool_name": "Bash", "tool_input": {"command": command}, **extra}
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        if project_dir:
+            env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+        r = subprocess.run([str(FACTORY), "hook"], input=stdin if stdin is not None else json.dumps(data),
+                           capture_output=True, text=True, env=env)
+        return r.returncode, r.stderr.strip()
+
+    def test_direct_writes_of_factory_state_are_stopped(self):
+        for command in [
+            "gh issue edit 7 --add-label stage:dev",
+            "gh issue edit 7 --repo acme/zz-home --remove-label stage:design --add-label stage:ready",
+            "cd /tmp && gh issue edit 7 --add-label factory:claimed",
+            "gh pr edit 3 --add-label 'stage:done'",
+            "gh issue create --title X --label stage:dev",
+            "gh issue comment 7 --body '<!-- factory:event {\"actor\": \"human\", \"kind\": \"approve\"} -->'",
+            "gh label delete stage:dev --yes",
+            "gh api repos/acme/zz-home/issues/7/labels -f 'labels[]=stage:dev'",
+            "gh api -X DELETE repos/acme/zz-home/issues/7/labels/stage:design",
+            "gh api --method PUT repos/acme/zz-home/issues/7/labels --input labels.json # stage:dev",
+            "curl -X POST https://api.github.com/repos/acme/zz-home/issues/7/labels -d '{\"labels\":[\"stage:dev\"]}'",
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(self.hook(command), (2, self.WRITE))
+
+    def test_reads_and_factory_commands_pass(self):
+        for command in [
+            "gh issue list --label stage:dev",
+            "gh issue view 7 --json labels",
+            "gh api 'repos/acme/zz-home/issues?labels=stage:dev' --jq '.[].number'",
+            "gh issue comment 7 --body 'The design is ready.'",
+            "gh issue edit 7 --add-label bug",
+            "factory advance ZZ-7",
+            "factory status zz",
+            "grep -rn 'stage:dev' docs/",
+            "git commit -m 'Add the dev stage'",
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(self.hook(command, folder=self.worktree), (0, ""))
+
+    def test_human_commands_are_stopped_in_a_work_session(self):
+        for command, name in [
+            ("factory go ZZ-7", "go"),
+            ("factory approve zz#7", "approve"),
+            ("factory verified ZZ-7", "verified"),
+            ("factory move ZZ-7 dev", "move"),
+            ("factory rework ZZ-7 'Fix it'", "rework"),
+            ("factory unblock ZZ-7", "unblock"),
+            ("bin/factory approve ZZ-7", "approve"),
+            ("~/.local/bin/factory approve ZZ-7", "approve"),
+            ("factory advance ZZ-7 && factory approve ZZ-7", "approve"),
+            ("FACTORY_REGISTRY=x factory  approve ZZ-7", "approve"),
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(self.hook(command, folder=self.worktree), (
+                    2, f"factory hook: `factory {name}` is a human command; a work session cannot run it. "
+                       "Stop and report to the owner."))
+
+    def test_work_session_is_found_from_a_subfolder_of_the_worktree(self):
+        self.assertEqual(self.hook("factory approve ZZ-7", folder=self.worktree / "src")[0], 2)
+
+    def test_cd_out_of_the_worktree_does_not_help(self):
+        # Claude Code reports the new cwd, but CLAUDE_PROJECT_DIR stays the session folder.
+        self.assertEqual(self.hook("factory approve ZZ-7", folder=self.main, project_dir=self.worktree)[0], 2)
+
+    def test_human_commands_pass_in_the_main_checkout(self):
+        for command in ["factory go ZZ-7", "factory approve ZZ-7", "factory verified ZZ-7",
+                        "factory move ZZ-7 dev", "factory rework ZZ-7 'Fix it'", "factory unblock ZZ-7"]:
+            with self.subTest(command=command):
+                self.assertEqual(self.hook(command, folder=self.main), (0, ""))
+
+    def test_human_commands_are_stopped_in_a_subagent(self):
+        self.assertEqual(self.hook("factory approve ZZ-7", folder=self.main, agent_id="a1"),
+                         (2, "factory hook: `factory approve` is a human command; a subagent cannot run it"))
+
+    def test_other_tools_pass(self):
+        self.assertEqual(self.hook("", tool_name="Read", tool_input={"file_path": "stage:dev"}), (0, ""))
+
+    def test_unreadable_input_stops_the_call(self):
+        self.assertEqual(self.hook("", stdin="not json"), (2, "factory hook: cannot read the hook input"))
+        self.assertEqual(self.hook("", stdin="[]"), (2, "factory hook: cannot read the hook input"))
+
+    def test_hooks_json_runs_factory_hook_from_the_plugin(self):
+        cfg = json.loads((FACTORY.parents[1] / "hooks" / "hooks.json").read_text())
+        (entry,) = cfg["hooks"]["PreToolUse"]
+        self.assertEqual(entry["matcher"], "Bash")
+        self.assertEqual(entry["hooks"], [{"type": "command", "command": '"${CLAUDE_PLUGIN_ROOT}/bin/factory" hook'}])
+
+
 if __name__ == "__main__":
     unittest.main()

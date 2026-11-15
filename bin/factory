@@ -80,6 +80,10 @@ LABEL_COLORS = {
 WIP_BUCKET = {"design": "design", "ready": "design", "dev": "dev", "verify": "dev"}
 
 
+# Commands that record a directive of the owner. `factory hook` stops them in work sessions.
+HUMAN_COMMANDS = ("go", "approve", "verified", "move", "rework", "unblock")
+
+
 def flag_label(flag: str) -> str:
     return f"factory:{flag}"
 
@@ -689,6 +693,62 @@ def format_status(st: dict) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------
+# Hook: the Claude Code PreToolUse guard (hooks/hooks.json)
+# --------------------------------------------------------------------------
+
+PROTECTED_RE = re.compile(r"\b(?:stage|factory):[a-z]")  # labels and the factory:event marker
+GH_WRITE_RE = re.compile(
+    r"\bgh\s+(?:issue|pr)\s+(?:edit|create|comment)\b"
+    r"|\bgh\s+label\s+(?:create|edit|delete|clone)\b"
+    r"|\bgh\s+api\b(?=.*\s(?:-X|--method|-f|-F|--field|--raw-field|--input)\b)"
+    r"|\bcurl\b", re.S)
+HUMAN_CALL_RE = re.compile(r"(?:^|[\s;&|()/'\"`])factory\s+(%s)\b" % "|".join(HUMAN_COMMANDS))
+
+
+def is_linked_worktree(folder: Path) -> bool:
+    """Work sessions run in linked git worktrees; the foreman runs in the main checkout."""
+    for d in [folder, *folder.parents]:
+        git = d / ".git"
+        if git.is_file():
+            return "/worktrees/" in git.read_text(errors="replace")
+        if git.is_dir():
+            return False
+    return False
+
+
+def check_hook(data: dict, project_dir: str | None) -> None:
+    """Raise Refusal if the tool call goes around the factory rules."""
+    if data.get("tool_name") != "Bash":
+        return
+    command = (data.get("tool_input") or {}).get("command") or ""
+    if PROTECTED_RE.search(command) and GH_WRITE_RE.search(command):
+        raise Refusal("only the `factory` CLI writes `stage:*` labels, `factory:*` labels and "
+                      "`factory:event` markers; run `factory --help`")
+    m = HUMAN_CALL_RE.search(command)
+    if m and data.get("agent_id"):
+        raise Refusal(f"`factory {m[1]}` is a human command; a subagent cannot run it")
+    if m and is_linked_worktree(Path(project_dir or data.get("cwd") or ".")):
+        raise Refusal(f"`factory {m[1]}` is a human command; a work session cannot run it. "
+                      "Stop and report to the owner.")
+
+
+def run_hook(raw: str) -> int:
+    """Exit code 0 permits the tool call. Exit code 2 stops it; Claude gets stderr."""
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError
+        check_hook(data, os.environ.get("CLAUDE_PROJECT_DIR"))
+    except ValueError:
+        print("factory hook: cannot read the hook input", file=sys.stderr)
+        return 2
+    except Refusal as e:
+        print(f"factory hook: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="factory", description="Factory stage state. The only writer of stage labels.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -743,8 +803,11 @@ def main(argv: list[str] | None = None) -> int:
     au.add_argument("foreman", nargs="?")
     lb = sub.add_parser("labels", help="create the stage and flag labels on GitHub (idempotent)")
     lb.add_argument("foreman", nargs="?")
+    sub.add_parser("hook", help="Claude Code PreToolUse guard: hook JSON on stdin, exit code 2 stops the call")
 
     args = p.parse_args(argv)
+    if args.cmd == "hook":
+        return run_hook(sys.stdin.read())
     try:
         out = dispatch(args)
     except Refusal as e:
