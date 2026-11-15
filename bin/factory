@@ -69,6 +69,8 @@ FLAGS = {
     "blocked": "The agent needs a human answer.",
     "rework": "The human gave feedback. The agent must revise.",
 }
+# Built-in Project workflows that move a card with no human and no `factory`. `factory setup` deletes them.
+STATUS_WORKFLOWS = ("Item closed",)
 FLAG_COLORS = {"claimed": "5319e7", "blocked": "b60205", "rework": "d93f0b"}
 
 # Which WIP bucket an issue counts against, by stage.
@@ -385,13 +387,14 @@ class GhBackend:
                 projectV2(number:$number){ id url
                   field(name:"Status"){ ... on ProjectV2SingleSelectField { id options { id name } } }
                   views(first:20){ nodes { id name layout } }
+                  workflows(first:20){ nodes { id name } }
                   repositories(first:50){ nodes { nameWithOwner } } } } } }""", owner=self.owner, number=self.number)
             pr = (data.get("repositoryOwner") or {}).get("projectV2")
             if not pr or not pr.get("field"):
                 raise UsageError(f"{self.owner} has no Project {self.number} with a Status field")
             self._board = {"id": pr["id"], "url": pr["url"], "field": pr["field"]["id"],
                            "options": {o["name"]: o["id"] for o in pr["field"]["options"]},
-                           "views": pr["views"]["nodes"],
+                           "views": pr["views"]["nodes"], "workflows": pr["workflows"]["nodes"],
                            "repos": [r["nameWithOwner"] for r in pr["repositories"]["nodes"]]}
         return self._board
 
@@ -450,7 +453,8 @@ class GhBackend:
         return self._api("issues", "-X", "POST", "-f", f"title={title}", "-f", f"body={body}")[0]["number"]
 
     def setup(self) -> list[str]:
-        """Make the board ready: Status options, a Board view, the repo link, the flag labels. Idempotent."""
+        """Make the board ready: Status options, a Board view, the repo link, no workflow that moves a
+        card, the flag labels. Idempotent."""
         b, done = self.board(), []
         if list(b["options"]) != [s.status for s in STAGES]:
             options = ",".join(
@@ -469,6 +473,11 @@ class GhBackend:
             self._gql("""mutation($project:ID!,$repo:ID!){ linkProjectV2ToRepository(input:{projectId:$project,
                 repositoryId:$repo}){ repository { id } } }""", project=b["id"], repo=repo)
             done.append("repo linked")
+        for w in b["workflows"]:
+            if w["name"] in STATUS_WORKFLOWS:  # a second writer of the Status; only factory and the owner write it
+                self._gql("mutation($w:ID!){ deleteProjectV2Workflow(input:{workflowId:$w}){ deletedWorkflowId } }",
+                          w=w["id"])
+                done.append(f"workflow {w['name']!r} deleted")
         for flag, desc in FLAGS.items():
             self._run(["gh", "label", "create", flag_label(flag), "--repo", self.repo, "--color", FLAG_COLORS[flag],
                        "--description", desc, "--force"])

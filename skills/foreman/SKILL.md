@@ -63,7 +63,7 @@ Then add the part for `next_action`:
 | `next_action` | Brief |
 |---|---|
 | `design` | Write the design in `docs/designs/<N>-<slug>.md` of the home repo: goal, design, options that were compared, limits, proof. Commit it on branch `<prefix>-<N>-<slug>`. Then run `factory advance <ID>` and `factory release <ID>`. |
-| `develop` | Read the design. Build it on branch `<prefix>-<N>-<slug>` with behavior tests. Run all the tests. Push the branch and open a PR that says `Closes #<N>` only if the PR is in the home repo. Then run `factory advance <ID>` and `factory release <ID>`. |
+| `develop` | Read the design. Build it on branch `<prefix>-<N>-<slug>` with behavior tests. Run all the tests. Push the branch and open a PR that names the issue as `Refs #<N>`. Never write `Closes`, `Fixes` or `Resolves` with an issue number in a PR or a commit message: only `factory advance` closes an issue. Then run `factory advance <ID>` and `factory release <ID>`. |
 | `ship` | Merge the PR. Run the tests on `main`. If they pass, run `factory advance <ID>` and `factory release <ID>`. If they fail, run `factory block <ID> "the tests fail on main: <summary>"`. |
 | `rework` | Run `factory show <ID>` and read the last `rework` note. Revise the work. Then run `factory reworked <ID>` and `factory release <ID>`. |
 
