@@ -230,7 +230,8 @@ REF_RE = re.compile(r"^\s*(?:([a-z][a-z0-9]{1,7})\s*[\s#-]\s*)?(\d+)\s*$", re.I)
 
 @dataclass
 class Foreman:
-    name: str
+    name: str  # what the owner calls the foreman: `fred go 6`
+    prefix: str  # what the issue IDs start with: FACTORY-6. Default: the name.
     title: str
     github: str  # owner/repo of the issue tracker (the home repo)
     root: Path  # folder that holds foreman.toml
@@ -238,7 +239,7 @@ class Foreman:
     wip: dict[str, int]
 
     def ref(self, number: int) -> str:
-        return f"{self.name.upper()}-{number}"
+        return f"{self.prefix.upper()}-{number}"
 
 
 def load_foreman(path: Path) -> Foreman:
@@ -249,6 +250,9 @@ def load_foreman(path: Path) -> Foreman:
     name = data.get("name", "")
     if not NAME_RE.match(name):
         raise UsageError(f"{path}: name {name!r} must be 2-8 lowercase letters or digits, first a letter")
+    prefix = data.get("prefix", name)
+    if not isinstance(prefix, str) or not NAME_RE.match(prefix):
+        raise UsageError(f"{path}: prefix {prefix!r} must be 2-8 lowercase letters or digits, first a letter")
     github = data.get("github", "")
     if not re.match(r"^[\w.-]+/[\w.-]+$", github):
         raise UsageError(f"{path}: github must be owner/repo, got {github!r}")
@@ -257,7 +261,7 @@ def load_foreman(path: Path) -> Foreman:
     for r in data.get("repos", []):
         repos.append({**r, "path": str((root / r.get("path", ".")).resolve())})
     wip = {"design": 2, "dev": 3, **data.get("wip", {})}
-    return Foreman(name, data.get("title", name), github, root, repos, wip)
+    return Foreman(name, prefix, data.get("title", name), github, root, repos, wip)
 
 
 def registry_path() -> Path:
@@ -306,9 +310,13 @@ def get_foreman(name: str | None) -> Foreman:
     reg = read_registry()
     if name:
         name = name.lower()
-        if name not in reg:
+        found = [f for f in all_foremen().values() if name in (f.name, f.prefix)]
+        if not found:
             raise UsageError(f"no foreman named {name!r}; known: {', '.join(sorted(reg)) or 'none'}")
-        return load_registered(name, reg[name])
+        if len(found) > 1:
+            raise UsageError(f"{name!r} is the name or prefix of more than one foreman: "
+                             f"{', '.join(sorted(f.name for f in found))}; change a prefix in foreman.toml")
+        return found[0]
     here = Path.cwd().resolve()
     for d in [here, *here.parents]:
         if (d / "foreman.toml").is_file():

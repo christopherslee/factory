@@ -1,6 +1,6 @@
 # factory — home repo of foreman `fred`
 
-This repo is the factory plugin (CLI `factory`) and also the home repo of foreman `fred`. Issue IDs: `FRED-1`.
+This repo is the factory plugin (CLI `factory`) and also the home repo of foreman `fred`. Issue IDs: `FACTORY-1` (`prefix = "factory"` in `foreman.toml`). Directives use the foreman name: `fred go 6`.
 The project name is `factory`. `fred` is only the name of its foreman. When the owner says "fred", they speak to the foreman of this project.
 
 - `bin/factory` is the only writer of stage state. All stage rules are in `STAGES`, `TRANSITIONS` and `check_advance`.
@@ -10,5 +10,5 @@ The project name is `factory`. `fred` is only the name of its foreman. When the 
 
 ## This repo is public
 - Never write details of a private project (names, code, issues, designs, data) in this repo, in its issues or in its PRs.
-- `FRED-*` issues are public. Write only about the factory itself.
+- `FACTORY-*` issues are public. Write only about the factory itself.
 - The foreman registry is private. It lives outside this repo (`~/.config/factory/foremen.toml`).

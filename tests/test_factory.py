@@ -19,11 +19,12 @@ class FactoryCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def make_foreman(self, name, github, folder=None, wip="", register=True):
+    def make_foreman(self, name, github, folder=None, wip="", register=True, prefix=None):
         d = self.root / (folder or f"{name}-home")
         d.mkdir(exist_ok=True)
         (d / "foreman.toml").write_text(
-            f'name = "{name}"\ngithub = "{github}"\n[[repos]]\nname = "app"\npath = "../app"\n[wip]\n{wip}\n')
+            f'name = "{name}"\n' + (f'prefix = "{prefix}"\n' if prefix else "") +
+            f'github = "{github}"\n[[repos]]\nname = "app"\npath = "../app"\n[wip]\n{wip}\n')
         if register:
             self.factory("register", str(d))
         return d
@@ -190,6 +191,28 @@ class TestRefs(FactoryCase):
         cc = self.make_foreman("cc", "acme/cc-home")
         (cc / "docs").mkdir()
         self.assertEqual(json.loads(self.factory("resolve", "42", cwd=cc / "docs"))["id"], "CC-42")
+
+    def test_prefix_names_the_issues_and_the_name_stays_for_directives(self):
+        ww = self.make_foreman("ww", "acme/ww-home", prefix="widget")
+        self.assertEqual(self.factory("new", "X", "--foreman", "ww"), "WIDGET-1: created in Backlog")
+        for text in ("WIDGET-1", "widget#1", "widget 1", "ww-1", "ww 1", "WW-1"):
+            self.assertEqual(json.loads(self.factory("resolve", text)),
+                             {"id": "WIDGET-1", "foreman": "ww", "github": "acme/ww-home", "number": 1}, text)
+        self.assertEqual(json.loads(self.factory("resolve", "1", cwd=ww))["id"], "WIDGET-1")
+        self.assertEqual(self.factory("go", "ww 1"), "WIDGET-1: Backlog → In Design")
+        self.assertIn("WIDGET-1", self.factory("status", "ww"))
+
+    def test_prefix_must_have_the_form_of_a_name(self):
+        d = self.make_foreman("ww", "acme/ww-home", prefix="Wid get", register=False)
+        self.assertEqual(self.factory("register", str(d), ok=None),
+                         f"error: {d / 'foreman.toml'}: prefix 'Wid get' must be 2-8 lowercase letters or digits, "
+                         "first a letter")
+
+    def test_prefix_of_one_foreman_must_not_be_the_name_or_prefix_of_another(self):
+        self.make_foreman("ww", "acme/ww-home", prefix="zz")
+        self.assertEqual(self.factory("resolve", "zz-1", ok=None),
+                         "error: 'zz' is the name or prefix of more than one foreman: ww, zz; "
+                         "change a prefix in foreman.toml")
 
     def test_unknown_foreman_is_an_error(self):
         out = self.factory("resolve", "qq-1", ok=None)

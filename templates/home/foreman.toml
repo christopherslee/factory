@@ -1,12 +1,14 @@
 # Foreman config. Register this folder with `factory register <folder>`.
 name = "{{name}}"            # 2-8 lowercase letters/digits. Issue IDs: {{NAME}}-42
 title = "{{title}}"
+# prefix = "{{name}}"        # optional: issue IDs start with this in place of the name
 github = "{{owner}}/{{name}}-home"   # issue tracker (this home repo)
 
 # Code repos this foreman works on. Paths are relative to this file.
 [[repos]]
 name = "{{repo}}"
 path = "../{{repo}}"
+# prefix = "{{name}}"        # optional: issue IDs start with this in place of the name
 github = "{{owner}}/{{repo}}"
 test = ""                    # test command, run in the repo root
 

@@ -1,6 +1,6 @@
 ---
 name: foreman
-description: Run an owner directive for a software factory project. Use when the owner's message starts with a foreman name from ~/.config/factory/foremen.toml (for example "fred go 4", "fred approve 4", "fred verified 4", "fred rework 4 ...", "fred status", "fred new ...") or names a factory issue ID such as FRED-4, and when a work session that this session started reports back.
+description: Run an owner directive for a software factory project. Use when the owner's message starts with a foreman name from ~/.config/factory/foremen.toml (for example "fred go 4", "fred approve 4", "fred verified 4", "fred rework 4 ...", "fred status", "fred new ...") or names a factory issue ID such as FACTORY-4, and when a work session that this session started reports back.
 ---
 
 # Foreman
@@ -23,6 +23,7 @@ Run `factory foremen` to see the foreman names, and `factory --help` for the com
 | `<name> status` | `factory status <name>` |
 
 - Free text is permitted when the directive and the issue are clear. If one of them is not clear, ask. Do not guess a human command.
+- The issue ID can have a different prefix than the foreman name (`fred go 6` is `FACTORY-6`). Use the ID that `factory` prints.
 - Issues and PRs share one number sequence. Take a new issue ID only from the output of `factory new`.
 
 ## 2. Human check
@@ -61,8 +62,8 @@ Then add the part for `next_action`:
 
 | `next_action` | Brief |
 |---|---|
-| `design` | Write the design in `docs/designs/<N>-<slug>.md` of the home repo: goal, design, options that were compared, limits, proof. Commit it on branch `<name>-<N>-<slug>`. Then run `factory advance <ID>` and `factory release <ID>`. |
-| `develop` | Read the design. Build it on branch `<name>-<N>-<slug>` with behavior tests. Run all the tests. Push the branch and open a PR that says `Closes #<N>` only if the PR is in the home repo. Then run `factory advance <ID>` and `factory release <ID>`. |
+| `design` | Write the design in `docs/designs/<N>-<slug>.md` of the home repo: goal, design, options that were compared, limits, proof. Commit it on branch `<prefix>-<N>-<slug>`. Then run `factory advance <ID>` and `factory release <ID>`. |
+| `develop` | Read the design. Build it on branch `<prefix>-<N>-<slug>` with behavior tests. Run all the tests. Push the branch and open a PR that says `Closes #<N>` only if the PR is in the home repo. Then run `factory advance <ID>` and `factory release <ID>`. |
 | `ship` | Merge the PR. Run the tests on `main`. If they pass, run `factory advance <ID>` and `factory release <ID>`. If they fail, run `factory block <ID> "the tests fail on main: <summary>"`. |
 | `rework` | Run `factory show <ID>` and read the last `rework` note. Revise the work. Then run `factory reworked <ID>` and `factory release <ID>`. |
 
@@ -83,4 +84,4 @@ Write to the owner in ASD-STE100 Simplified Technical English:
 
 ## Privacy
 
-The factory repo and its `FRED-*` issues are public. Never write details of a different project there. A work session of one project must not write to the repo or the issues of a different project.
+The factory repo and its `FACTORY-*` issues are public. Never write details of a different project there. A work session of one project must not write to the repo or the issues of a different project.
