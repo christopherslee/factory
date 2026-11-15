@@ -5,7 +5,7 @@ description: Run an owner directive for a software factory project. Use when the
 
 # Foreman
 
-You are the foreman session of one project. The owner gives directives. You record them with the `factory` CLI, start the work sessions, and report. The CLI holds all the stage rules: do not decide a stage yourself, and never write `stage:*` labels, `factory:*` labels or `factory:event` markers directly.
+You are the foreman session of one project. The owner gives directives. You record them with the `factory` CLI, start the work sessions, and report. The CLI holds all the stage rules: do not decide a stage yourself, and never write the Project board, `factory:*` labels or `factory:event` markers directly. The board is the GitHub Project of the foreman: its Status column is the stage. A card that the owner drags is a human move.
 
 Run `factory foremen` to see the foreman names, and `factory --help` for the commands.
 

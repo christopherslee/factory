@@ -41,8 +41,8 @@ class FactoryCase(unittest.TestCase):
     def db(self):
         return json.loads(self.fake.read_text())["acme/zz-home"]["issues"]
 
-    def labels(self, n):
-        return sorted(self.db()[str(n)]["labels"])
+    def stage(self, n):
+        return self.db()[str(n)]["stage"]
 
 
 class TestLifecycle(FactoryCase):
@@ -61,7 +61,7 @@ class TestLifecycle(FactoryCase):
         self.assertEqual(self.factory("verified", "ZZ-1"),
                          "ZZ-1: verified; the agent can now merge, test and close")
         self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: Waiting for Verification → Done")
-        self.assertEqual(self.labels(1), ["stage:done"])
+        self.assertEqual(self.stage(1), "done")
         self.assertEqual(self.db()["1"]["state"], "closed")
 
     def test_human_event_without_verified_does_not_permit_ship(self):
@@ -94,10 +94,24 @@ class TestLifecycle(FactoryCase):
         self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
                          "refused: the last move was an agent move; a human event must come first")
 
-    def test_label_change_outside_factory_counts_as_human_event(self):
+    def test_stage_change_outside_factory_counts_as_human_event(self):
+        # The owner drags the card on the board: Ready for Dev → In Dev is the same as `approve`.
+        self.factory("new", "X", "--foreman", "zz")
+        self.factory("go", "ZZ-1")
+        self.factory("advance", "ZZ-1")
+        self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
+                         "refused: Ready for Dev → In Dev is a human move (`factory approve`)")
+        db = json.loads(self.fake.read_text())
+        db["acme/zz-home"]["issues"]["1"]["stage"] = "dev"
+        self.fake.write_text(json.dumps(db))
+        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: In Dev → Waiting for Verification")
+        self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
+                         "refused: the last move was an agent move; a human event must come first")
+
+    def test_drag_from_backlog_is_the_same_as_go(self):
         self.factory("new", "X", "--foreman", "zz")
         db = json.loads(self.fake.read_text())
-        db["acme/zz-home"]["issues"]["1"]["labels"] = ["stage:design"]
+        db["acme/zz-home"]["issues"]["1"]["stage"] = "design"
         self.fake.write_text(json.dumps(db))
         self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: In Design → Ready for Dev")
 
@@ -108,12 +122,12 @@ class TestLifecycle(FactoryCase):
         self.assertEqual(self.factory("verified", "ZZ-1", ok=False),
                          "refused: ZZ-1 is in Backlog; `verified` needs Waiting for Verification")
 
-    def test_move_replaces_the_stage_label_and_reopens(self):
+    def test_move_sets_the_stage_and_reopens(self):
         self.factory("new", "X", "--foreman", "zz")
         self.factory("move", "ZZ-1", "done")
         self.assertEqual(self.db()["1"]["state"], "closed")
         self.factory("move", "ZZ-1", "backlog")
-        self.assertEqual(self.labels(1), ["stage:backlog"])
+        self.assertEqual(self.stage(1), "backlog")
         self.assertEqual(self.db()["1"]["state"], "open")
 
 
@@ -170,16 +184,41 @@ class TestStatus(FactoryCase):
         self.assertEqual(st["issues"][0]["next_action"], "ship")
         self.assertEqual(st["start"], ["ZZ-1"])
 
-    def test_audit_finds_two_stage_labels(self):
+    def test_issue_that_is_not_on_the_board_has_no_stage(self):
         self.factory("new", "A", "--foreman", "zz")
         db = json.loads(self.fake.read_text())
-        db["acme/zz-home"]["issues"]["1"]["labels"] = ["stage:dev", "stage:design"]
+        db["acme/zz-home"]["issues"]["1"]["stage"] = None
+        self.fake.write_text(json.dumps(db))
+        missing = "ZZ-1 has no stage: it is not on the board; a human must run `factory move ZZ-1 backlog`"
+        self.assertEqual(self.factory("audit", "zz", ok=False), f"refused: \n{missing}")
+        self.assertEqual(self.factory("advance", "ZZ-1", ok=False), f"refused: {missing}")
+        self.assertEqual(self.factory("move", "ZZ-1", "backlog"), "ZZ-1: not on the board → Backlog")
+        self.assertEqual(self.factory("audit", "zz"), "no problems")
+
+    def test_audit_finds_an_open_issue_in_done(self):
+        # The owner drags the card to Done on the board. That does not close the issue.
+        self.factory("new", "A", "--foreman", "zz")
+        db = json.loads(self.fake.read_text())
+        db["acme/zz-home"]["issues"]["1"]["stage"] = "done"
         self.fake.write_text(json.dumps(db))
         self.assertEqual(self.factory("audit", "zz", ok=False),
-                         "refused: \nZZ-1: expected exactly one stage label, found ['design', 'dev']; run `factory audit`")
-        self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
-                         "refused: expected exactly one stage label, found ['design', 'dev']; run `factory audit`")
+                         "refused: \nZZ-1: in Done but the issue is open; a human must close it or move it")
 
+    def test_setup_is_a_command(self):
+        self.assertEqual(self.factory("setup", "zz"), "zz: the board and the flag labels are ready")
+
+    def test_project_must_be_a_number(self):
+        d = self.root / "zz-home"
+        (d / "foreman.toml").write_text('name = "zz"\ngithub = "acme/zz-home"\nproject = "one"\n')
+        self.assertEqual(self.factory("status", "zz", ok=None),
+                         f"error: {d / 'foreman.toml'}: project must be the number of a GitHub Project, got 'one'")
+
+    def test_real_backend_needs_a_project(self):
+        env = {**os.environ, "FACTORY_REGISTRY": str(self.root / "foremen.toml")}
+        env.pop("FACTORY_FAKE", None)
+        r = subprocess.run([str(FACTORY), "status", "zz"], capture_output=True, text=True, env=env)
+        self.assertEqual((r.returncode, r.stderr.strip()), (2, f"error: {self.root / 'zz-home' / 'foreman.toml'}: "
+                         "set project to the number of the GitHub Project (the board)"))
 
 class TestRefs(FactoryCase):
     def test_all_reference_forms_resolve_to_one_id(self):
@@ -256,8 +295,10 @@ class TestRefs(FactoryCase):
 class TestHook(unittest.TestCase):
     """Call `factory hook` as Claude Code does: PreToolUse JSON on stdin, exit code 2 stops the call."""
 
-    WRITE = ("factory hook: only the `factory` CLI writes `stage:*` labels, `factory:*` labels and "
-             "`factory:event` markers; run `factory --help`")
+    WRITE = ("factory hook: only the `factory` CLI writes `factory:*` labels and `factory:event` markers; "
+             "run `factory --help`")
+    BOARD = ("factory hook: only the `factory` CLI writes the Project board, which holds the stages; "
+             "run `factory --help`")
 
     @classmethod
     def setUpClass(cls):
@@ -287,31 +328,51 @@ class TestHook(unittest.TestCase):
 
     def test_direct_writes_of_factory_state_are_stopped(self):
         for command in [
-            "gh issue edit 7 --add-label stage:dev",
-            "gh issue edit 7 --repo acme/zz-home --remove-label stage:design --add-label stage:ready",
-            "cd /tmp && gh issue edit 7 --add-label factory:claimed",
-            "gh pr edit 3 --add-label 'stage:done'",
-            "gh issue create --title X --label stage:dev",
+            "gh issue edit 7 --add-label factory:claimed",
+            "gh issue edit 7 --repo acme/zz-home --remove-label factory:blocked",
+            "cd /tmp && gh pr edit 3 --add-label 'factory:rework'",
+            "gh issue create --title X --label factory:claimed",
             "gh issue comment 7 --body '<!-- factory:event {\"actor\": \"human\", \"kind\": \"approve\"} -->'",
-            "gh label delete stage:dev --yes",
-            "gh api repos/acme/zz-home/issues/7/labels -f 'labels[]=stage:dev'",
-            "gh api -X DELETE repos/acme/zz-home/issues/7/labels/stage:design",
-            "gh api --method PUT repos/acme/zz-home/issues/7/labels --input labels.json # stage:dev",
-            "curl -X POST https://api.github.com/repos/acme/zz-home/issues/7/labels -d '{\"labels\":[\"stage:dev\"]}'",
+            "gh label delete factory:claimed --yes",
+            "gh api repos/acme/zz-home/issues/7/labels -f 'labels[]=factory:rework'",
+            "gh api -X DELETE repos/acme/zz-home/issues/7/labels/factory:blocked",
+            "gh api --method PUT repos/acme/zz-home/issues/7/labels --input labels.json # factory:claimed",
+            "curl -X POST https://api.github.com/repos/acme/zz-home/issues/7/comments -d '{\"body\":\"factory:event\"}'",
         ]:
             with self.subTest(command=command):
                 self.assertEqual(self.hook(command), (2, self.WRITE))
 
+    def test_direct_writes_of_the_board_are_stopped(self):
+        for command in [
+            "gh project item-edit --id PVTI_1 --project-id PVT_1 --field-id F --single-select-option-id O",
+            "gh project item-add 1 --owner acme --url https://github.com/acme/zz-home/issues/7",
+            "gh project item-delete 1 --owner acme --id PVTI_1",
+            "gh project item-archive 1 --owner acme --id PVTI_1",
+            "gh project field-delete --id F",
+            "gh project delete 1 --owner acme",
+            "cd /tmp && gh  project  edit 1 --owner acme --title X",
+            "gh api graphql -f query='mutation { updateProjectV2ItemFieldValue(input: {}) { projectV2Item { id } } }'",
+            "gh api graphql -f query='mutation($p:ID!){ addProjectV2ItemById(input:{projectId:$p}){ item { id } } }'",
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(self.hook(command), (2, self.BOARD))
+
     def test_reads_and_factory_commands_pass(self):
         for command in [
-            "gh issue list --label stage:dev",
+            "gh issue list --label factory:blocked",
             "gh issue view 7 --json labels",
-            "gh api 'repos/acme/zz-home/issues?labels=stage:dev' --jq '.[].number'",
+            "gh api 'repos/acme/zz-home/issues?labels=factory:blocked' --jq '.[].number'",
+            "gh project list --owner acme",
+            "gh project view 1 --owner acme",
+            "gh project item-list 1 --owner acme --format json",
+            "gh project field-list 1 --owner acme",
+            "gh api graphql -f query='query { viewer { projectV2(number: 1) { id } } }'",
+            "gh api graphql -f query='mutation { addStar(input: {starrableId: \"x\"}) { clientMutationId } }'",
             "gh issue comment 7 --body 'The design is ready.'",
             "gh issue edit 7 --add-label bug",
             "factory advance ZZ-7",
             "factory status zz",
-            "grep -rn 'stage:dev' docs/",
+            "grep -rn 'factory:event' docs/",
             "git commit -m 'Add the dev stage'",
         ]:
             with self.subTest(command=command):
