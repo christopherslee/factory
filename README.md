@@ -4,6 +4,7 @@ Claude Code plugin for a laptop-first software factory.
 This repo is also the home repo of foreman **fred** (named for Fred Flintstone). Its issues are `FACTORY-1`, `FACTORY-2`, and so on: the issue prefix is the project name, and `fred` is only the name of the foreman.
 Each project has a **foreman**: a home repo with `foreman.toml`, issues, docs, mockups and data.
 Issue IDs use the form `CC-42`: the prefix, then the issue number of the home repo. The prefix is the foreman name, or `prefix` in `foreman.toml` if it is set.
+A project can keep its designs, mockups and delivery docs in a separate **project home** repo: set `home = "../project-home"` in `foreman.toml` (relative to that file). Then the foreman briefs and `factory status --json` (`home`, `designs`, `mockups`) point to that folder. When `home` is not set, the folder of `foreman.toml` is the project home.
 
 ## The `factory` CLI
 
