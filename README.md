@@ -34,6 +34,7 @@ Set `FACTORY_FAKE=/path/state.json` to use a local JSON file in place of GitHub.
 
 - `bin/factory` — CLI; all stage rules are in this file
 - `hooks/hooks.json` — runs `factory hook` before each Bash call: stops direct writes of `stage:*` and `factory:*` state, and stops human commands in work sessions (design: `docs/designs/2-hooks.md`)
+- `skills/foreman/` — the skill that runs an owner directive such as `fred go 4`: records it, starts the work sessions and reports (design: `docs/designs/4-foreman-skill.md`)
 - `tests/` — behavior tests (`python3 -m unittest discover -s tests -v`)
 - `templates/home/` — template for a new foreman home repo
 - `foreman.toml` — config of foreman `fred` (this repo)
