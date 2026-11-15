@@ -1,7 +1,7 @@
 # factory — home repo of foreman `fred`
 
 This repo is the factory plugin (CLI `factory`) and also the home repo of foreman `fred`. Issue IDs: `FRED-1`.
-When the owner says "fred", they mean this project.
+The project name is `factory`. `fred` is only the name of its foreman. When the owner says "fred", they speak to the foreman of this project.
 
 - `bin/factory` is the only writer of stage state. All stage rules are in `STAGES`, `TRANSITIONS` and `check_advance`.
 - Run the tests: `python3 -m unittest discover -s tests -v`
