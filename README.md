@@ -35,6 +35,7 @@ Set `FACTORY_FAKE=/path/state.json` to use a local JSON file in place of GitHub.
 ## Layout
 
 - `bin/factory` — CLI; all stage rules are in this file
+- `bin/install-skills` — pull the fixed `main` checkout and link its skills into `~/.claude/skills/`
 - `hooks/hooks.json` — runs `factory hook` before each Bash call: stops direct writes of the Project board and of `factory:*` state, and stops human commands in work sessions (design: `docs/designs/2-hooks.md`)
 - `skills/foreman/` — the skill that runs an owner directive such as `fred go 4`: records it, starts the work sessions and reports (design: `docs/designs/4-foreman-skill.md`)
 - `skills/work/` — the skill that a work session runs (`/work ID`): it does the stage that `next_action` names, `design`, `develop`, `ship` or `rework` (design: `docs/designs/12-stage-skills.md`)
@@ -45,11 +46,13 @@ Set `FACTORY_FAKE=/path/state.json` to use a local JSON file in place of GitHub.
 
 ## Install the skills
 
-Link each skill folder of the fixed `main` checkout into `~/.claude/skills/`:
+`bin/install-skills` pulls the fixed `main` checkout and links each of its skill folders into `~/.claude/skills/`. It removes a link to a skill that was deleted. You can run it from any checkout or worktree: it always links from the main checkout, and it changes nothing if that checkout is not on a clean `main`. A second run gives the same links.
 
 ```
-for s in foreman work; do ln -sfn ~/projects/factory/skills/$s ~/.claude/skills/$s; done
+bin/install-skills
 ```
+
+The ship step of this repo runs it (`## Ship` in `CLAUDE.md`).
 
 ## Smoke test (real GitHub)
 

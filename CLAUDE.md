@@ -8,6 +8,9 @@ The project name is `factory`. `fred` is only the name of its foreman. When the 
 - Write reports for the owner in ASD-STE100 Simplified Technical English.
 - Sessions must run the installed plugin from a fixed `main` checkout, never from a worktree.
 
+## Ship
+After the PR is merged and the tests pass on `main`, run `bin/install-skills`. It pulls the fixed `main` checkout and links its skills into `~/.claude/skills/`. If it refuses, report the refusal.
+
 ## This repo is public
 - Never write details of a private project (names, code, issues, designs, data) in this repo, in its issues or in its PRs.
 - `FACTORY-*` issues are public. Write only about the factory itself.
