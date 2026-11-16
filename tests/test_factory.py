@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,12 +56,12 @@ class TestLifecycle(FactoryCase):
         self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
                          "refused: Ready for Dev → In Dev is a human move (`factory approve`)")
         self.assertEqual(self.factory("approve", "zz#1"), "ZZ-1: Ready for Dev → In Dev")
-        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: In Dev → Waiting for Verification")
+        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: In Dev → Verify")
         self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
                          "refused: the last move was an agent move; a human event must come first")
         self.assertEqual(self.factory("verified", "ZZ-1"),
                          "ZZ-1: verified; the agent can now merge, test and close")
-        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: Waiting for Verification → Done")
+        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: Verify → Done")
         self.assertEqual(self.stage(1), "done")
         self.assertEqual(self.db()["1"]["state"], "closed")
 
@@ -73,7 +74,7 @@ class TestLifecycle(FactoryCase):
         self.factory("rework", "ZZ-1", "Fix the label")
         self.factory("reworked", "ZZ-1")
         self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
-                         "refused: Waiting for Verification → Done needs the human directive `verified`")
+                         "refused: Verify → Done needs the human directive `verified`")
 
     def test_human_move_back_permits_a_new_agent_move(self):
         self.factory("new", "X", "--foreman", "zz")
@@ -82,8 +83,8 @@ class TestLifecycle(FactoryCase):
         self.factory("approve", "ZZ-1")
         self.factory("advance", "ZZ-1")
         self.assertEqual(self.factory("move", "ZZ-1", "dev", "--note", "Button is wrong"),
-                         "ZZ-1: Waiting for Verification → In Dev")
-        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: In Dev → Waiting for Verification")
+                         "ZZ-1: Verify → In Dev")
+        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: In Dev → Verify")
 
     def test_old_verified_does_not_carry_over_after_rework(self):
         self.factory("new", "X", "--foreman", "zz")
@@ -104,7 +105,7 @@ class TestLifecycle(FactoryCase):
         db = json.loads(self.fake.read_text())
         db["acme/zz-home"]["issues"]["1"]["stage"] = "dev"
         self.fake.write_text(json.dumps(db))
-        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: In Dev → Waiting for Verification")
+        self.assertEqual(self.factory("advance", "ZZ-1"), "ZZ-1: In Dev → Verify")
         self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
                          "refused: the last move was an agent move; a human event must come first")
 
@@ -120,7 +121,7 @@ class TestLifecycle(FactoryCase):
         self.assertEqual(self.factory("approve", "ZZ-1", ok=False),
                          "refused: ZZ-1 is in Backlog; `approve` needs Ready for Dev")
         self.assertEqual(self.factory("verified", "ZZ-1", ok=False),
-                         "refused: ZZ-1 is in Backlog; `verified` needs Waiting for Verification")
+                         "refused: ZZ-1 is in Backlog; `verified` needs Verify")
 
     def test_move_sets_the_stage_and_reopens(self):
         self.factory("new", "X", "--foreman", "zz")
@@ -425,6 +426,7 @@ class TestHook(unittest.TestCase):
             "gh issue comment 7 --body 'The design is ready.'",
             "gh issue edit 7 --add-label bug",
             "factory advance ZZ-7",
+            "factory ready-to-try ZZ-7 abc1234",
             "factory status zz",
             "grep -rn 'factory:event' docs/",
             "git commit -m 'Add the dev stage'",
@@ -440,6 +442,7 @@ class TestHook(unittest.TestCase):
             ("factory move ZZ-7 dev", "move"),
             ("factory rework ZZ-7 'Fix it'", "rework"),
             ("factory unblock ZZ-7", "unblock"),
+            ("factory try ZZ-7", "try"),
             ("bin/factory approve ZZ-7", "approve"),
             ("~/.local/bin/factory approve ZZ-7", "approve"),
             ("factory advance ZZ-7 && factory approve ZZ-7", "approve"),
@@ -483,3 +486,106 @@ class TestHook(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def load_cli():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("factory_cli", str(FACTORY))
+    spec = importlib.util.spec_from_loader("factory_cli", loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["factory_cli"] = mod  # dataclasses look the module up here
+    loader.exec_module(mod)
+    return mod
+
+
+class TestStageRename(unittest.TestCase):
+    def test_old_status_name_still_reads_as_verify(self):
+        self.assertEqual(load_cli().STATUS_STAGE["Waiting for Verification"], "verify")
+
+    def test_setup_keeps_the_option_id_of_the_old_name(self):
+        # Without the old ID, GitHub makes a new option and the cards in the column lose their stage.
+        cli = load_cli()
+        existing = {"Backlog": "b", "In Design": "d", "Ready for Dev": "r", "In Dev": "v",
+                    "Waiting for Verification": "w", "Done": "x"}
+        self.assertEqual([(o.get("id"), o["name"]) for o in cli.status_options(existing)],
+                         [("b", "Backlog"), ("d", "In Design"), ("r", "Ready for Dev"), ("v", "In Dev"),
+                          ("w", "Verify"), ("x", "Done")])
+
+    def test_setup_makes_options_that_do_not_exist(self):
+        self.assertEqual([o.get("id") for o in load_cli().status_options({"Backlog": "b"})],
+                         ["b", None, None, None, None, None])
+
+
+class TestTry(FactoryCase):
+    def to_stage(self, *cmds):
+        self.factory("new", "A", "--foreman", "zz")
+        for cmd in cmds:
+            self.factory(cmd, "ZZ-1")
+
+    def action(self):
+        return json.loads(self.factory("status", "zz", "--json"))["issues"][0]["next_action"]
+
+    def test_try_is_refused_before_in_dev(self):
+        self.to_stage("go")
+        self.assertEqual(self.factory("try", "ZZ-1", ok=False),
+                         "refused: ZZ-1 is in In Design; `try` needs In Dev or Verify")
+        self.assertEqual(self.factory("ready-to-try", "ZZ-1", "abc1234", ok=False),
+                         "refused: ZZ-1 is in In Design; `ready-to-try` needs In Dev or Verify")
+
+    def test_try_in_dev_comes_before_develop(self):
+        self.to_stage("go", "advance", "approve")
+        self.assertEqual(self.factory("try", "ZZ-1", "--note", "look now"), "ZZ-1: try; the agent will make it ready to try")
+        self.assertEqual(self.action(), "try")
+        self.assertEqual(self.factory("ready-to-try", "ZZ-1", "abc1234def"), "ZZ-1: ready to try @ abc1234")
+        self.assertEqual(self.action(), "develop")
+
+    def test_try_in_verify_then_verified_ships(self):
+        self.to_stage("go", "advance", "approve", "advance")
+        self.factory("try", "ZZ-1")
+        self.assertEqual(self.action(), "try")
+        self.assertEqual(self.factory("ready-to-try", "ZZ-1", "abc1234", "--where", "http://localhost:3000"),
+                         "ZZ-1: ready to try @ abc1234 · http://localhost:3000")
+        self.assertEqual(self.action(), None)
+        self.assertEqual(self.factory("advance", "ZZ-1", ok=False),
+                         "refused: Verify → Done needs the human directive `verified`")
+        self.factory("verified", "ZZ-1")
+        self.assertEqual(self.action(), "ship")
+
+    def test_sha_must_be_a_commit_id(self):
+        self.to_stage("go", "advance", "approve")
+        self.assertEqual(self.factory("ready-to-try", "ZZ-1", "main", ok=None),
+                         "error: 'main' is not a commit sha (7 to 40 hex characters)")
+
+    def test_status_shows_the_newest_build_to_try(self):
+        self.to_stage("go", "advance", "approve")
+        self.factory("new", "B", "--foreman", "zz")
+        self.factory("ready-to-try", "ZZ-1", "1111111aaaa")
+        self.assertIn("\nReady to try: ZZ-1 @ 1111111\n", self.factory("status", "zz"))
+        self.factory("move", "ZZ-2", "dev")
+        self.factory("ready-to-try", "ZZ-2", "2222222bbbb", "--where", "Test iPhone")
+        self.assertIn("\nReady to try: ZZ-2 @ 2222222 · Test iPhone\n", self.factory("status", "zz"))
+        st = json.loads(self.factory("status", "zz", "--json"))["ready_to_try"]
+        self.assertEqual((st["id"], st["sha"], st["where"]), ("ZZ-2", "2222222bbbb", "Test iPhone"))
+
+    def test_status_has_no_line_when_nothing_is_ready_to_try(self):
+        self.to_stage("go")
+        self.assertNotIn("Ready to try", self.factory("status", "zz"))
+        self.assertIsNone(json.loads(self.factory("status", "zz", "--json"))["ready_to_try"])
+
+    def test_audit_warns_when_verify_has_no_build_to_try(self):
+        self.to_stage("go", "advance", "approve", "advance")
+        stale = ('refused: \nZZ-1: in Verify, but the build to try is older than the last revision; '
+                 'say "zz try 1"')
+        self.assertEqual(self.factory("audit", "zz", ok=False), stale)
+        self.factory("ready-to-try", "ZZ-1", "abc1234")
+        self.assertEqual(self.factory("audit", "zz"), "no problems")
+        self.factory("rework", "ZZ-1", "Fix the label")
+        self.factory("reworked", "ZZ-1")
+        self.assertEqual(self.factory("audit", "zz", ok=False), stale)
+        self.factory("ready-to-try", "ZZ-1", "def5678")
+        self.assertEqual(self.factory("audit", "zz"), "no problems")
+
+    def test_audit_is_silent_in_dev(self):
+        self.to_stage("go", "advance", "approve")
+        self.assertEqual(self.factory("audit", "zz"), "no problems")
