@@ -1,11 +1,11 @@
 ---
 name: foreman
-description: Run an owner directive for a software factory project. Use when the owner's message starts with a foreman name from ~/.config/factory/foremen.toml (for example "fred go 4", "fred approve 4", "fred verified 4", "fred rework 4 ...", "fred status", "fred new ...") or names a factory issue ID such as FACTORY-4, and when a work session that this session started reports back.
+description: Run an owner directive for a software factory project. Use when the owner's message starts with a foreman name from ~/.config/factory/foremen.toml (for example "fred go 4", "fred approve 4", "fred verified 4", "fred rework 4 ...", "fred status", "fred new ...") or names a factory issue ID such as FACTORY-4, and when a subagent that this session started reports back.
 ---
 
 # Foreman
 
-You are the foreman session of one project. The owner gives directives. You record them with the `factory` CLI, start the work sessions, and report. The CLI holds all the stage rules: do not decide a stage yourself, and never write the Project board, `factory:*` labels or `factory:event` markers directly. The board is the GitHub Project of the foreman: its Status column is the stage. A card that the owner drags is a human move.
+You are the foreman session of one project. The owner gives directives. You record them with the `factory` CLI, do the work in this session, and report. The CLI holds all the stage rules: do not decide a stage yourself, and never write the Project board, `factory:*` labels or `factory:event` markers directly. The board is the GitHub Project of the foreman: its Status column is the stage. A card that the owner drags is a human move.
 
 Run `factory foremen` to see the foreman names, and `factory --help` for the commands.
 
@@ -42,34 +42,32 @@ If the CLI refuses, report the refusal and stop. Do not try a different command 
 
 Run `factory audit <name>`. Report each problem. Do not repair a problem with a human command.
 
-## 5. Start the work sessions
+## 5. Do the work
 
-Run `factory status <name> --json`. For each issue ID in `start`:
+The owner is in this session. Do the work here. Do not start a different session.
 
-1. Find the issue in `issues` and read its `next_action`.
-2. Start one work session in a **new git worktree** of the code repo (`repos[].path`), with the brief below. A work session must run in a worktree: the factory hook stops human commands there.
-3. Run `factory claim <ID> <session id>` with the ID of the session that started.
+Run `factory status <name> --json`. For each issue ID in `start`, one issue at a time:
 
-If you have no tool that starts a session, use a subagent with worktree isolation and the same brief.
+1. Run `factory claim <ID> foreman`.
+2. Run the skill `/work <ID>`. Do only this issue. The `work` skill finds the action (`design`, `develop`, `ship` or `rework`) itself. It holds the procedure, the folders, the rules and the form of the report. While you do it, its rules apply: run no human command.
+3. Do section 6, then start the next issue.
 
-If this turn started from a session event, do not start sessions. Propose them to the owner.
+If this turn started from a session event or a subagent report, do not start work. Tell the owner what `start` lists.
 
-### Brief
+### Subagent
 
-The brief of each work session is: "You are the work session for `<ID>` (`<title>`) of foreman `<name>`. Run the skill `/work <ID>`. Do only this issue."
+Use a subagent only if it is necessary: the owner asks for two or more issues at the same time, or the work would fill the context of this session. Give the subagent worktree isolation (the factory hook stops human commands in a worktree) and this brief: "You are the work session for `<ID>` (`<title>`) of foreman `<name>`. Run the skill `/work <ID>`. Do only this issue." Run `factory claim <ID> subagent` before it starts.
 
-The `work` skill finds the action (`design`, `develop`, `ship` or `rework`) itself. It holds the procedure, the folders, the rules and the form of the report.
+## 6. When the work is done
 
-## 6. When a work session reports
-
-A report is not proof. Run `factory show <ID>` and look at the result (the design file, the diff or the PR). Then tell the owner what waits for them, with the exact directive to say.
+A report is not proof, also your own. Run `factory show <ID>` and look at the result (the design file, the diff or the PR). Then tell the owner what waits for them, with the exact directive to say.
 
 ## 7. Report
 
 Write to the owner in ASD-STE100 Simplified Technical English:
 
 - what moved (the output lines of `factory`),
-- which sessions started, with links,
+- which issues you worked on, and each subagent, if you used one,
 - what waits for the owner, with the exact directive (for example `fred approve 4`),
 - problems from the audit.
 

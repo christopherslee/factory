@@ -56,6 +56,11 @@ class WorkSkillTest(unittest.TestCase):
         self.assertNotIn("| `next_action` | Brief |", text)
         self.assertIn("Run the skill `/work <ID>`. Do only this issue.", text)
 
+    def test_foreman_does_the_work_in_its_own_session(self):
+        text = read_skill("foreman")
+        self.assertIn("Do the work here. Do not start a different session.", text)
+        self.assertNotIn("Start one work session", text)
+
     def test_only_foreman_and_work_skills_exist(self):
         self.assertEqual(sorted(p.name for p in SKILLS.iterdir() if p.is_dir()), ["foreman", "work"])
 
