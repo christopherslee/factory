@@ -1,25 +1,28 @@
 ---
-name: design
-description: Write the design of one factory issue in the In Design stage. Use only when a factory work session brief says `/design <ID>`, or when the owner runs `/design` with a factory issue ID such as FACTORY-12.
+name: work
+description: Do the next stage of one factory issue (design, develop, ship or rework), as `next_action` of the factory CLI names it. Use only when a factory work session brief says `/work <ID>`, or when the owner runs `/work` with a factory issue ID such as FACTORY-12.
 ---
 
-# Design
+# Work
 
-You are a work session of the software factory. Run this skill as `/design <ID>`, for example `/design FACTORY-12`. `<N>` is the issue number, `<prefix>` is the issue prefix in lowercase, and `<slug>` is a short name from the issue title. Do only this issue.
+You are a work session of the software factory. Run this skill as `/work <ID>`, for example `/work FACTORY-12`. `<N>` is the issue number, `<prefix>` is the issue prefix in lowercase, and `<slug>` is a short name from the issue title. Do only this issue.
 
 ## Start
 
 1. Run `factory show <ID>` and `factory resolve <ID>`. The output of `resolve` gives the foreman name.
 2. Run `factory status <foreman> --json`. Take `root`, `home`, `designs`, `mockups` and `repos` from the output. Read `CLAUDE.md` in `root`, and in `home` if it is a different folder.
 3. List `<home>/.claude/skills/`. Read each `SKILL.md` whose description applies to this stage, and follow it. Use the tools in `<home>/bin` and the data in `<home>/data` as `CLAUDE.md` in the project home tells.
-4. Check the precondition of this skill (table below). If it is not true, change nothing, report, and stop. A second start of the same skill is thus safe.
+4. Find the action. `next_action` in `factory status --json` names it, but it is empty while a session holds the claim, and the foreman claims the issue for you. Thus take the action from this table, with the stage and the flags from `factory show <ID>`. The rows are the rules of `next_action` in the CLI, without the claim.
 
-| Skill | Precondition |
+| Stage and flags | Action |
 |---|---|
-| `design` | The stage is In Design. The `rework` flag is not set. |
-| `develop` | The stage is In Dev. The `rework` flag is not set. The file `<designs>/<N>-*.md` is there. |
-| `ship` | The stage is Waiting for Verification. A `verified` event comes after the last agent move. |
-| `rework` | The `rework` flag is set. |
+| The `rework` flag is set (any stage) | `rework` |
+| In Design | `design` |
+| In Dev | `develop` |
+| Waiting for Verification, and a `verified` event comes after the last agent move | `ship` |
+
+5. If the `blocked` flag is set, or no row applies, change nothing, report the stage and the flags, and stop. A second start of this skill is thus safe.
+6. Do only the Steps section of that action.
 
 ## Folders
 
@@ -44,6 +47,10 @@ To find the case, compare `git rev-parse --show-toplevel` in `home` and in the c
 
 ## Steps
 
+Do only the section of the action that Start found.
+
+### design
+
 1. Decide if the issue changes something that a user sees.
    - **Yes:** make 2–3 mockup images, labeled A, B and C, in `<mockups>/<N>-<slug>/`. Recommend one.
    - **No:** compare 2–3 approaches in a table. Recommend one.
@@ -55,6 +62,48 @@ To find the case, compare `git rev-parse --show-toplevel` in `home` and in the c
 4. Run `factory advance <ID>`.
 
 The owner then says `approve` (the recommendation and the defaults are accepted) or `rework` with a short note ("B, with the colors of A"; "1. yes 2. no").
+
+### develop
+
+1. Read the design file in `designs` and each event after it. An owner note is stronger than the design text.
+2. Find the worktree of the code repo on branch `<prefix>-<N>-<slug>`. If no worktree exists yet, create one (rule 4 in "Folders"). Work only in it. Merge the main branch into it first.
+3. Build in small units. For each unit: write the behavior test, write the code, run the tests, commit. Write the test first for logic that has no user interface.
+4. Merge the main branch again. Run all the tests.
+5. Look at the full diff for secrets and private data.
+6. Do the `## Verify` section of `CLAUDE.md` in the project home. This section tells you how to put the real artifact in front of the owner (for example: install the build on the review device, or start the app and make screenshots). If the section is not there, use the product as a user does and keep the output as proof.
+7. Push the branch. Open a PR that names the issue as `Refs #<N>`. The PR body contains "What to check": three to five steps that the owner can do in two minutes, each with the expected result.
+8. Run `factory advance <ID>`.
+
+### ship
+
+1. Merge the main branch into the issue branch. If there is a conflict that changes behavior, run `factory block <ID> "summary of the conflict"` and stop.
+2. Run all the tests on the branch.
+3. Merge the PR. Delete the branch on the remote.
+4. Run all the tests on the main branch. If they fail, run `factory block <ID> "the tests fail on main: <summary>"` and stop. Do not revert without the owner.
+5. Do the `## Ship` section of `CLAUDE.md` in the project home, if it is there (for example: deliver the build from the main branch).
+6. Run `factory advance <ID>`. This closes the issue.
+
+Start the report with four lines: **Merged** (commit), **Tests on main** (result), **Issue** (closed or open), **Stage**.
+
+### rework
+
+1. Read the last `rework` note in `factory show <ID>`. The stage tells what to revise:
+
+   | Stage | Revise |
+   |---|---|
+   | In Design, Ready for Dev | The design file and the mockups. With a project home: commit directly to it (rule 3). Without: in the worktree of the issue, and create a new one if none exists (rule 2). |
+   | In Dev, Waiting for Verification | The code and the tests, in the worktree of the issue, on the same branch and the same PR of the code repo. If no worktree exists, create one on that branch (rule 4). If the note changes the design, also the design file, in the place that rules 1–3 tell. |
+
+2. Do only what the note says. If the note has two possible meanings, use the smaller one and state it in the report.
+3. Special notes:
+   - A selection ("B", or "A with one part of B"): make the one result. Move the options that were not selected to "Options that were compared".
+   - Numbered answers: write each answer into "Decisions for the owner" as decided.
+   - "Back it out": revert the change. Keep the issue and its branch.
+   - An idea "for later": write it as a follow-up. Do not build it.
+4. For code: run all the tests, push, do the `## Verify` section again, and update "What to check" in the PR.
+5. Run `factory reworked <ID>`. The stage does not change.
+
+In the report, give one line for each item of the note: what it was before, and what it is now.
 
 ## End
 

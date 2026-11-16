@@ -56,9 +56,9 @@ If this turn started from a session event, do not start sessions. Propose them t
 
 ### Brief
 
-The brief of each work session is: "You are the work session for `<ID>` (`<title>`) of foreman `<name>`. Run the skill `/<next_action> <ID>`. Do only this issue."
+The brief of each work session is: "You are the work session for `<ID>` (`<title>`) of foreman `<name>`. Run the skill `/work <ID>`. Do only this issue."
 
-The stage skills (`design`, `develop`, `ship`, `rework`) hold the procedure, the folders, the rules and the form of the report. Their names are the values of `next_action`.
+The `work` skill finds the action (`design`, `develop`, `ship` or `rework`) itself. It holds the procedure, the folders, the rules and the form of the report.
 
 ## 6. When a work session reports
 

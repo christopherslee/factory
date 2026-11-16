@@ -2,11 +2,11 @@
 
 ## Summary
 
-- Four skills replace the four briefs in the foreman skill: `design`, `develop`, `ship`, `rework`. Each skill name is equal to a `next_action` value of the CLI.
-- Each skill keeps the work session inside the issue. A new idea goes into the report as a follow-up. It does not go into the work.
-- Each skill follows how the owner works: options to pick by letter, the real artifact in front of the owner before verification, and a short report that states the end state.
-- A project can have a separate project home (FACTORY-26). It is the workspace of the foreman: designs, mockups, data, tools and project skills. The code repo gets only code. The skills copy nothing from the project home into the code repo.
-- Three decisions wait for the owner. Each has a default. See "Decisions for the owner". The owner answered decision 4 in a rework note.
+- One skill, `work`, replaces the four briefs in the foreman skill. It finds the action (`design`, `develop`, `ship` or `rework`) and does only the Steps section of that action.
+- The skill keeps the work session inside the issue. A new idea goes into the report as a follow-up. It does not go into the work.
+- The skill follows how the owner works: options to pick by letter, the real artifact in front of the owner before verification, and a short report that states the end state.
+- A project can have a separate project home (FACTORY-26). It is the workspace of the foreman: designs, mockups, data, tools and project skills. The code repo gets only code. The skill copies nothing from the project home into the code repo.
+- Two decisions wait for the owner. Each has a default. See "Decisions for the owner". The owner answered decision 3 in a rework note.
 
 ## Goal
 
@@ -41,21 +41,18 @@ The source is the owner's own messages in approximately 40 recent Claude Code se
 ### Files
 
 ```
-skills/design/SKILL.md
-skills/develop/SKILL.md
-skills/ship/SKILL.md
-skills/rework/SKILL.md
+skills/work/SKILL.md
 ```
 
-The name of each skill is the `next_action` value that `factory status` prints. Thus the foreman skill needs no table from action to brief (*Model the Domain*).
+The skill takes one argument: the issue ID (`/work FACTORY-12`). It has these sections: Start, Folders, Rules, Steps (`### design`, `### develop`, `### ship`, `### rework`), End. The Steps names are the `next_action` values of the CLI, so the foreman skill needs no table from action to brief (*Model the Domain*).
 
-Each skill takes one argument: the issue ID (`/design FACTORY-12`).
+`next_action` in `factory status --json` is empty while a session holds the claim, and the foreman claims the issue for the work session. Thus the skill takes the action from a table with the same rules as `next_action` in the CLI, without the claim (see Start).
 
 ### Folders
 
 The project home is the workspace of the foreman (FACTORY-26). It holds what the foreman and its work sessions need to do the work: designs, mockups, data, tools and project skills. The code repo holds only the product code. This is true also when the code is in a different repo.
 
-No skill contains a fixed path. Each skill takes the folders from `factory status <foreman> --json`, and finds the other folders of the project home from `home`:
+The skill contains no fixed path. It takes the folders from `factory status <foreman> --json`, and finds the other folders of the project home from `home`:
 
 | Field | What it is | What a skill does there |
 |---|---|---|
@@ -67,7 +64,7 @@ No skill contains a fixed path. Each skill takes the folders from `factory statu
 | `<home>/.claude/skills` | Project skills (for example a house style, or a check list for a review). | Skills read the ones that apply to the stage. |
 | `repos[].path` | The code repos. | `develop`, `ship` and `rework` change code here, in the worktree of the session. |
 
-A work session runs in a worktree of the code repo. Claude Code loads `CLAUDE.md` and `.claude/skills/` from the folder where a session starts, not from a different folder. Thus a session does not get the project home automatically. The Start block of each skill loads it explicitly.
+A work session runs in a worktree of the code repo. Claude Code loads `CLAUDE.md` and `.claude/skills/` from the folder where a session starts, not from a different folder. Thus a session does not get the project home automatically. The Start block of the skill loads it explicitly.
 
 Nothing is copied from the project home into the code repo, also not after approval. Two copies drift apart, and the project home then stops being the one source. The PR can link to the design file.
 
@@ -84,26 +81,28 @@ The skill finds the case with `git rev-parse --show-toplevel` in `home` and in e
 
 The table of four briefs is deleted (*Subtract Before You Add*). The brief of a work session becomes:
 
-> You are the work session for `<ID>` (`<title>`) of foreman `<name>`. Run the skill `/<next_action> <ID>`. Do only this issue.
+> You are the work session for `<ID>` (`<title>`) of foreman `<name>`. Run the skill `/work <ID>`. Do only this issue.
 
-The other rules of the brief on `main` (the folders, never run a human command, `factory block` for a question, the form of the report) move into the skills. The paragraph that tells the foreman session to take the folders from `factory status` is also deleted from the foreman skill: the skills do this.
+The other rules of the brief on `main` (the folders, never run a human command, `factory block` for a question, the form of the report) move into the `work` skill. The paragraph that tells the foreman session to take the folders from `factory status` is also deleted from the foreman skill: the `work` skill does this.
 
-### Common part of each skill
+### Common part
 
-Each skill has the same three blocks. A test makes sure that the text of these blocks is the same in the four files (*Encode Lessons in Structure*).
+Start, Folders, Rules and End are written one time and apply to each action.
 
 **Start**
 
 1. Run `factory show <ID>` and `factory status <foreman> --json`. Take `root`, `home`, `designs`, `mockups` and `repos` from the output. Read `CLAUDE.md` in `root`, and in `home` if it is a different folder.
 2. List `<home>/.claude/skills/`. Read each `SKILL.md` whose description applies to this stage, and follow it. Use the tools in `<home>/bin` and the data in `<home>/data` as `CLAUDE.md` in the project home tells.
-3. Check the precondition of the skill (table below). If it is not true, change nothing, report, and stop. A second start of the same skill is thus safe (*Make Operations Idempotent*).
+3. Find the action with this table (stage and flags from `factory show <ID>`). If the `blocked` flag is set or no row applies, change nothing, report, and stop. A second start of the skill is thus safe (*Make Operations Idempotent*).
 
-| Skill | Precondition |
+| Stage and flags | Action |
 |---|---|
-| `design` | The stage is In Design. The `rework` flag is not set. |
-| `develop` | The stage is In Dev. The `rework` flag is not set. The file `<designs>/<N>-*.md` is there. |
-| `ship` | The stage is Waiting for Verification. A `verified` event comes after the last agent move. |
-| `rework` | The `rework` flag is set. |
+| The `rework` flag is set (any stage) | `rework` |
+| In Design | `design` |
+| In Dev | `develop` |
+| Waiting for Verification, and a `verified` event comes after the last agent move | `ship` |
+
+4. Do only the Steps section of that action.
 
 **Rules**
 
@@ -183,20 +182,20 @@ The report gives one line for each item of the note: what it was before, and wha
 
 ### Change to the home template
 
-`templates/home/CLAUDE.md` gets two empty sections, `## Verify` and `## Ship`, each with one line that explains its purpose, and one line that lists the folders of the project home: `docs/designs/`, `mockups/`, `data/`, `bin/`, `.claude/skills/`. A project with a separate project home puts these two sections in the `CLAUDE.md` of the project home. The private details of a project (devices, commands, accounts) stay in the repos of that project. The skills contain none.
+`templates/home/CLAUDE.md` gets two empty sections, `## Verify` and `## Ship`, each with one line that explains its purpose, and one line that lists the folders of the project home: `docs/designs/`, `mockups/`, `data/`, `bin/`, `.claude/skills/`. A project with a separate project home puts these two sections in the `CLAUDE.md` of the project home. The private details of a project (devices, commands, accounts) stay in the repos of that project. The skill contains none.
 
 ### Installation
 
-`~/.claude/skills/` has one link for each skill folder. The README gets the four new `ln -s` lines next to the line for `foreman`. The links point to the fixed `main` checkout, so the skills are available after this issue is shipped.
+`~/.claude/skills/` has one link for each skill folder: `foreman` and `work`. The README has one install line for both. The links point to the fixed `main` checkout, so the skill is available after this issue is shipped.
 
 ## Options that were compared
 
 | Option | Result |
 |---|---|
-| A. Four skills, one for each `next_action`, with a common part that a test keeps equal | **Selected.** A session loads only the procedure of its stage. The names come from the CLI, so the foreman skill holds no table. |
-| B. One `work` skill with four sections | Not selected. No repeated text, but each session reads three procedures that it must not do. This is a risk for the scope defect. |
+| A. Four skills, one for each `next_action`, with a common part that a test keeps equal | Not selected. About 70% of each skill was the same text, and a test was necessary only to keep the copies equal. |
+| B. One `work` skill with one Steps section for each action | **Selected** (owner rework note). The common text is written one time. The scope rule keeps the session inside the issue, not the split into four files. |
 | C. Keep the briefs in the foreman skill and make them longer | Not selected. The foreman session carries all the text in each directive turn, and the owner cannot run a stage directly. |
-| D. A shared rules file that the four skills refer to | Not selected. A session can fail to read the second file. Repeated text plus a test is more reliable (*Minimize Reader Load*). |
+| D. Four skills and a shared rules file that they refer to | Not selected. A session can fail to read the second file (*Minimize Reader Load*). |
 
 For the design of a project with a separate project home:
 
@@ -211,7 +210,7 @@ For the files that the foreman needs:
 
 | Option | Result |
 |---|---|
-| The project home holds them, and each skill loads them in its Start block | **Selected.** One source. The code repo stays clean of private research and tools. |
+| The project home holds them, and the skill loads them in its Start block | **Selected.** One source. The code repo stays clean of private research and tools. |
 | `develop` copies the approved design and mockup into the code repo | Not selected. Two copies drift apart. A rework must change both. |
 | Start each work session in the project home, not in the code repo | Not selected. The factory hook finds a work session by its worktree, and the code change needs a worktree of the code repo. |
 
@@ -232,11 +231,10 @@ For follow-ups:
 
 ## Decisions for the owner
 
-1. **Skill names.** Default: `design`, `develop`, `ship`, `rework`, as the issue says. The risk: the owner says "ship it" in sessions that are not factory sessions, and a global skill named `ship` can start there. The precondition check stops it with no change. Alternative: `factory-design`, `factory-develop`, `factory-ship`, `factory-rework`.
-2. **Follow-ups.** Default: the report lists them and the owner says `<name> new "title"`. Alternative: the work session creates the Backlog issues.
-3. **Tests fail on main after the merge.** Default: block and wait for the owner. Alternative: the session reverts the merge commit, then blocks.
+1. **Follow-ups.** Default: the report lists them and the owner says `<name> new "title"`. Alternative: the work session creates the Backlog issues.
+2. **Tests fail on main after the merge.** Default: block and wait for the owner. Alternative: the session reverts the merge commit, then blocks.
 
-4. **Design of a project with a separate project home.** Answered by the owner: design and spec work go into the project home and are committed directly to that repo. Folder and naming conventions prevent most conflicts. See rules 1 and 3 in "Folders".
+3. **Design of a project with a separate project home.** Answered by the owner: design and spec work go into the project home and are committed directly to that repo. Folder and naming conventions prevent most conflicts. See rules 1 and 3 in "Folders".
 
 ## Out of scope
 
@@ -250,19 +248,18 @@ For follow-ups:
 
 - The scope rule is an instruction, not a check. The proof below shows if it holds for one issue. If a session adds scope again, the next step is a check of the diff against the design file.
 - The quality of the delivery step depends on the `## Verify` section of each project. An empty section gives a weaker proof.
-- A skill that is linked into `~/.claude/skills/` is visible in all sessions of the owner, also outside the factory. See decision 1.
+- A skill that is linked into `~/.claude/skills/` is visible in all sessions of the owner, also outside the factory. The description of `work` limits it to a factory issue ID, and Start stops with no change when no action applies.
 - With a separate project home, a design is on the default branch of that repo before the owner approves it. The stage on the board is the only sign that it is approved.
 - With a separate project home, two sessions can commit in one checkout at the same time. They write different files, but one `git commit` or `git push` can fail and must be tried again.
 - The path with a separate project home is tested only with the first such project.
 - The Start block loads project skills by an instruction, so a session can skip one. Test result in the `develop` session (Claude Code CLI 2.1): `claude -p "..." --add-dir <home>` lists the skills of `<home>/.claude/skills/`, and the same run without `--add-dir` does not. Thus a work session that starts with the project home as an added folder gets the project skills automatically. The foreman skill does not do this yet, because the app tool that starts a session must accept an added folder. Until then the instruction stays.
-- The mockups of a private project are in its private project home. The skills never copy them into this repo.
+- The mockups of a private project are in its private project home. The skill never copies them into this repo.
 
 ## Proof
 
 1. **Tests** (`tests/test_skills.py`):
-   - For each `next_action` value that the CLI can print, `skills/<value>/SKILL.md` is there and its `name` is equal to the value.
-   - The Rules block is the same text in the four skills.
-   - The foreman skill does not contain the old brief table.
-   - No skill contains the text `home repo` or a path that starts with `docs/designs` or `mockups/`: each path comes from the `designs` and `mockups` fields.
-2. **Real run:** after this issue is shipped, one new issue goes from Backlog to Done. Its events show a `design` session, a `develop` session and a `ship` session, and one `rework` round. Each session report names the skill that it ran. The diff of that issue contains nothing that the issue did not ask for.
+   - For each `next_action` value that the CLI can print, the `work` skill has a `### <value>` Steps section and a row in the action table.
+   - The foreman skill runs `/work <ID>` and does not contain the old brief table.
+   - The skill does not contain the text `home repo` or a path that starts with `docs/designs` or `mockups/`: each path comes from the `designs` and `mockups` fields.
+2. **Real run:** after this issue is shipped, one new issue goes from Backlog to Done. Its events show a `design` session, a `develop` session and a `ship` session, and one `rework` round. Each session report names the action that it did. The diff of that issue contains nothing that the issue did not ask for.
 3. **Separate project home:** the first issue of a project with a `home` field has its design file in `designs` on the default branch of the project home, and its code PR contains no design file, mockup, data or tool. The session reports which project skills and tools from the project home it used.

@@ -1,7 +1,6 @@
-"""Behavior tests for the stage skills: one skill for each next_action of the CLI, with equal common blocks."""
+"""Behavior tests for the work skill: one Steps section for each next_action of the CLI."""
 import importlib.machinery
 import importlib.util
-import itertools
 import re
 import sys
 import unittest
@@ -9,8 +8,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SKILLS = REPO / "skills"
-STAGE_SKILLS = ["design", "develop", "ship", "rework"]
-COMMON = ["Start", "Folders", "Rules", "End"]
 
 
 def load_cli():
@@ -26,53 +23,51 @@ def read_skill(name):
     return (SKILLS / name / "SKILL.md").read_text()
 
 
-def front_matter(text):
-    m = re.match(r"---\n(.*?)\n---\n", text, re.S)
-    return dict(line.split(": ", 1) for line in m.group(1).splitlines())
+def cli_actions():
+    """Each next_action value that the CLI can print."""
+    cli = load_cli()
+    verified = [cli.Event("agent", "advance", "dev", "verify"), cli.Event("human", "verified")]
+    actions = {cli.next_action(stage, flags, events)
+               for stage in cli.STAGE
+               for flags in ([], ["rework"], ["claimed"], ["blocked"])
+               for events in ([], verified)}
+    actions.discard(None)
+    return actions
 
 
-def section(text, title):
-    m = re.search(rf"^## {title}\n(.*?)(?=^## |\Z)", text, re.S | re.M)
-    return m.group(1) if m else None
+class WorkSkillTest(unittest.TestCase):
+    def test_each_next_action_has_a_steps_section(self):
+        text = read_skill("work")
+        steps = re.search(r"^## Steps\n(.*?)(?=^## |\Z)", text, re.S | re.M).group(1)
+        sections = set(re.findall(r"^### (\w+)$", steps, re.M))
+        self.assertEqual(cli_actions(), {"design", "develop", "ship", "rework"})
+        self.assertEqual(sections, cli_actions())
 
+    def test_each_next_action_is_in_the_action_table(self):
+        text = read_skill("work")
+        for action in cli_actions():
+            self.assertRegex(text, rf"\| `{action}` \|$".replace("$", r"\n"))
 
-class StageSkillsTest(unittest.TestCase):
-    def test_each_next_action_has_a_skill_with_that_name(self):
-        cli = load_cli()
-        verified = [cli.Event("agent", "advance", "dev", "verify"), cli.Event("human", "verified")]
-        actions = set()
-        for stage in cli.STAGE:
-            for flags in ([], ["rework"], ["claimed"], ["blocked"]):
-                for events in ([], verified):
-                    actions.add(cli.next_action(stage, flags, events))
-        actions.discard(None)
-        self.assertEqual(actions, {"design", "develop", "ship", "rework"})
-        for action in actions:
-            self.assertEqual(front_matter(read_skill(action))["name"], action)
+    def test_skill_name_is_work(self):
+        self.assertRegex(read_skill("work"), r"^---\nname: work\n")
 
-    def test_common_blocks_are_the_same_text_in_the_four_skills(self):
-        for title in COMMON:
-            texts = {name: section(read_skill(name), title) for name in STAGE_SKILLS}
-            self.assertNotIn(None, texts.values(), f"## {title} is missing in {texts}")
-            for a, b in itertools.combinations(STAGE_SKILLS, 2):
-                self.assertEqual(texts[a], texts[b], f"## {title} differs between {a} and {b}")
-
-    def test_foreman_skill_has_no_brief_table(self):
+    def test_foreman_skill_runs_work_and_has_no_brief_table(self):
         text = read_skill("foreman")
         self.assertNotIn("| `next_action` | Brief |", text)
-        self.assertIn("Run the skill `/<next_action> <ID>`", text)
+        self.assertIn("Run the skill `/work <ID>`. Do only this issue.", text)
 
-    def test_no_stage_skill_has_a_fixed_design_or_mockup_path(self):
-        for name in STAGE_SKILLS:
-            text = read_skill(name)
-            self.assertNotIn("home repo", text, name)
-            self.assertIsNone(re.search(r"(?<![\w<>/])(docs/designs|mockups/)", text), name)
+    def test_only_foreman_and_work_skills_exist(self):
+        self.assertEqual(sorted(p.name for p in SKILLS.iterdir() if p.is_dir()), ["foreman", "work"])
 
-    def test_no_stage_skill_permits_a_human_command(self):
-        for name in STAGE_SKILLS:
-            text = read_skill(name)
-            for cmd in ("go", "approve", "verified", "move", "unblock"):
-                self.assertIsNone(re.search(rf"^\s*\d+\. Run `factory {cmd}\b", text, re.M), f"{name}: factory {cmd}")
+    def test_no_fixed_design_or_mockup_path(self):
+        text = read_skill("work")
+        self.assertNotIn("home repo", text)
+        self.assertIsNone(re.search(r"(?<![\w<>/])(docs/designs|mockups/)", text))
+
+    def test_no_step_runs_a_human_command(self):
+        text = read_skill("work")
+        for cmd in ("go", "approve", "verified", "move", "unblock"):
+            self.assertIsNone(re.search(rf"^\s*\d+\. Run `factory {cmd}\b", text, re.M), f"factory {cmd}")
 
 
 if __name__ == "__main__":
