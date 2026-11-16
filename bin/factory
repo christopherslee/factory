@@ -33,6 +33,7 @@ class Stage:
     key: str
     status: str  # name of the Status option on the Project board
     color: str  # color of that option
+    old: tuple[str, ...] = ()  # earlier names of the option; `factory setup` renames them and keeps the cards
 
 
 STAGES = [
@@ -40,11 +41,11 @@ STAGES = [
     Stage("design", "In Design", "BLUE"),
     Stage("ready", "Ready for Dev", "PURPLE"),
     Stage("dev", "In Dev", "YELLOW"),
-    Stage("verify", "Waiting for Verification", "ORANGE"),
+    Stage("verify", "Verify", "ORANGE", old=("Waiting for Verification",)),
     Stage("done", "Done", "GREEN"),
 ]
 STAGE = {s.key: s for s in STAGES}
-STATUS_STAGE = {s.status: s.key for s in STAGES}
+STATUS_STAGE = {name: s.key for s in STAGES for name in (*s.old, s.status)}
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,11 @@ WIP_BUCKET = {"design": "design", "ready": "design", "dev": "dev", "verify": "de
 
 
 # Commands that record a directive of the owner. `factory hook` stops them in work sessions.
-HUMAN_COMMANDS = ("go", "approve", "verified", "move", "rework", "unblock")
+HUMAN_COMMANDS = ("go", "approve", "verified", "try", "move", "rework", "unblock")
+
+# Commands that record an event and do not change the stage: the stages where each is permitted.
+EVENT_STAGES = {"verified": ("verify",), "try": ("dev", "verify"), "ready-to-try": ("dev", "verify")}
+SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
 
 def flag_label(flag: str) -> str:
@@ -95,12 +100,14 @@ MARKER_RE = re.compile(r"<!--\s*factory:event\s+(\{.*?\})\s*-->", re.S)
 @dataclass
 class Event:
     actor: str  # "human" or "agent"
-    kind: str  # advance | go | approve | verified | move | rework | claim | release | flag | unflag
+    kind: str  # advance | go | approve | verified | try | ready-to-try | move | rework | claim | release | flag | unflag
     frm: str | None = None
     to: str | None = None
     session: str | None = None
     note: str | None = None
-    at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    sha: str | None = None  # ready-to-try: the commit of the build
+    where: str | None = None  # ready-to-try: the device or URL
+    at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
 
     def to_comment(self) -> str:
         data = {k: v for k, v in self.__dict__.items() if v is not None}
@@ -112,6 +119,10 @@ class Event:
             text = f"**{STAGE[self.frm].status} → {STAGE[self.to].status}** ({self.kind})"
         else:
             text = f"**{self.kind}**"
+        if self.sha:
+            text += f" @ `{self.sha[:7]}`"
+        if self.where:
+            text += f" · {self.where}"
         if self.session:
             text += f" · session `{self.session}`"
         if self.note:
@@ -181,6 +192,8 @@ def next_action(stage: str, flags: list[str], events: list[Event]) -> str | None
         return None
     if "rework" in flags:
         return "rework"
+    if stage in EVENT_STAGES["try"] and try_pending(events):
+        return "try"
     if stage == "design":
         return "design"
     if stage == "dev":
@@ -192,6 +205,21 @@ def next_action(stage: str, flags: list[str], events: list[Event]) -> str | None
         except Refusal:
             return None
     return None
+
+
+def last_index(events: list[Event], kind: str) -> int:
+    return max((i for i, e in enumerate(events) if e.kind == kind), default=-1)
+
+
+def try_pending(events: list[Event]) -> bool:
+    """The owner said `try` after the last build that is ready to try."""
+    return last_index(events, "try") > last_index(events, "ready-to-try")
+
+
+def build_is_stale(events: list[Event]) -> bool:
+    """No build to try, or a revision came after the last one."""
+    ready = last_index(events, "ready-to-try")
+    return ready < 0 or any(e.kind == "unflag" and e.note == "rework cleared" for e in events[ready + 1:])
 
 
 def plan_starts(issues: list[dict], wip: dict[str, int]) -> list[str]:
@@ -483,8 +511,9 @@ class GhBackend:
         b, done = self.board(), []
         if list(b["options"]) != [s.status for s in STAGES]:
             options = ",".join(
-                "{" + (f"id:{json.dumps(b['options'][s.status])}," if s.status in b["options"] else "")
-                + f'name:{json.dumps(s.status)},color:{s.color},description:""' + "}" for s in STAGES)
+                "{" + (f"id:{json.dumps(o['id'])}," if o.get("id") else "")
+                + f'name:{json.dumps(o["name"])},color:{o["color"]},description:""' + "}"
+                for o in status_options(b["options"]))
             self._gql("mutation($field:ID!){ updateProjectV2Field(input:{fieldId:$field,singleSelectOptions:[%s]}){"
                       " projectV2Field { ... on ProjectV2SingleSelectField { id } } } }" % options, field=b["field"])
             done.append("Status options set")
@@ -508,6 +537,16 @@ class GhBackend:
                        "--description", desc, "--force"])
         self._board = None
         return done
+
+
+def status_options(existing: dict[str, str]) -> list[dict]:
+    """The Status options for `factory setup`. Each keeps the ID of its current or old name, so GitHub renames
+    the option and the cards stay in it. Without an ID, GitHub makes a new option."""
+    options = []
+    for s in STAGES:
+        option_id = next((existing[n] for n in (s.status, *s.old) if n in existing), None)
+        options.append({"name": s.status, "color": s.color, **({"id": option_id} if option_id else {})})
+    return options
 
 
 def _parse_json_stream(text: str) -> list:
@@ -659,15 +698,35 @@ def op_advance(ref: str, session: str | None) -> str:
     return f"{s.id}: {STAGE[t.frm].status} → {STAGE[t.to].status}"
 
 
+def check_event_stage(s: IssueState, kind: str) -> None:
+    stage = s.stage
+    if stage not in EVENT_STAGES[kind]:
+        need = " or ".join(STAGE[k].status for k in EVENT_STAGES[kind])
+        raise Refusal(f"{s.id} is in {STAGE[stage].status}; `{kind}` needs {need}")
+
+
+def op_ready_to_try(ref: str, sha: str, where: str | None) -> str:
+    sha = sha.strip().lower()
+    if not SHA_RE.match(sha):
+        raise UsageError(f"{sha!r} is not a commit sha (7 to 40 hex characters)")
+    f, n = resolve(ref)
+    be = backend_for(f)
+    s = read(f, n, be)
+    check_event_stage(s, "ready-to-try")
+    be.comment(n, Event("agent", "ready-to-try", sha=sha, where=where or None).to_comment())
+    return f"{s.id}: ready to try @ {sha[:7]}" + (f" · {where}" if where else "")
+
+
 def op_directive(ref: str, directive: str, note: str | None) -> str:
     f, n = resolve(ref)
     be = backend_for(f)
     s = read(f, n, be)
     stage = s.stage
-    if directive == "verified":
-        if stage != "verify":
-            raise Refusal(f"{s.id} is in {STAGE[stage].status}; `verified` needs {STAGE['verify'].status}")
-        be.comment(n, Event("human", "verified", note=note).to_comment())
+    if directive in ("verified", "try"):
+        check_event_stage(s, directive)
+        be.comment(n, Event("human", directive, note=note).to_comment())
+        if directive == "try":
+            return f"{s.id}: try; the agent will make it ready to try"
         return f"{s.id}: verified; the agent can now merge, test and close"
     t = next((t for t in TRANSITIONS.values() if t.directive == directive), None)
     if t is None:
@@ -748,14 +807,22 @@ def issue_summary(s: IssueState) -> dict:
             "next_action": next_action(stage, s.flags, s.events), "claimed_by": claim_owner(s.events)}
 
 
+def newest_ready_to_try(states: list[IssueState]) -> dict | None:
+    """The build that the owner can try now: the newest `ready-to-try` event of the open issues."""
+    builds = [{"id": s.id, "sha": e.sha, "where": e.where, "at": e.at}
+              for s in states for e in s.events if e.kind == "ready-to-try"]
+    return max(builds, key=lambda b: b["at"], default=None)
+
+
 def op_status(foreman: str | None) -> dict:
     f = get_foreman(foreman)
     be = backend_for(f)
-    issues = [issue_summary(read(f, n, be)) for n in be.open_issues()]
+    states = [read(f, n, be) for n in be.open_issues()]
+    issues = [issue_summary(s) for s in states]
     return {"foreman": f.name, "github": f.github, "root": str(f.root), "home": str(f.home),
             "designs": str(f.home / "docs" / "designs"), "mockups": str(f.home / "mockups"),
             "repos": f.repos, "wip": f.wip,
-            "issues": issues, "start": plan_starts(issues, f.wip)}
+            "issues": issues, "ready_to_try": newest_ready_to_try(states), "start": plan_starts(issues, f.wip)}
 
 
 def op_audit(foreman: str | None) -> list[str]:
@@ -773,6 +840,9 @@ def op_audit(foreman: str | None) -> list[str]:
             problems.append(f"{s.id}: claimed label with no claim event")
         if s.stage_key == "done" and s.state == "open":  # the list of open issues can be stale
             problems.append(f"{s.id}: in Done but the issue is open; a human must close it or move it")
+        if s.stage_key == "verify" and build_is_stale(s.events):
+            problems.append(f"{s.id}: in Verify, but the build to try is older than the last revision; "
+                            f'say "{f.name} try {s.number}"')
     return problems
 
 
@@ -821,6 +891,9 @@ def format_status(st: dict) -> str:
             action = f" → {i['next_action']}" if i["next_action"] else ""
             err = f"  ! {i['error']}" if i.get("error") else ""
             lines.append(f"  {i['id']:<10} {i['title']} {extra}{action}{err}".rstrip())
+    if st.get("ready_to_try"):
+        b = st["ready_to_try"]
+        lines.append(f"\nReady to try: {b['id']} @ {b['sha'][:7]}" + (f" · {b['where']}" if b["where"] else ""))
     lines.append(f"\nstart now: {', '.join(st['start']) or 'nothing'}")
     return "\n".join(lines)
 
@@ -917,8 +990,14 @@ def main(argv: list[str] | None = None) -> int:
     rd = sub.add_parser("reworked", help="AGENT: clear rework after the revision")
     rd.add_argument("ref")
 
+    rt = sub.add_parser("ready-to-try", help="AGENT: record the build that the owner can try now")
+    rt.add_argument("ref")
+    rt.add_argument("sha")
+    rt.add_argument("--where", help="the device or the URL")
+
     for d, h in [("go", "Backlog → In Design"), ("approve", "Ready for Dev → In Dev"),
-                 ("verified", "permit the agent to merge, test and close")]:
+                 ("verified", "permit the agent to merge, test and close"),
+                 ("try", "ask the agent to make the issue branch ready to try (In Dev or Verify)")]:
         x = sub.add_parser(d, help=f"HUMAN: {h}")
         x.add_argument("ref")
         x.add_argument("--note")
@@ -996,7 +1075,9 @@ def dispatch(a) -> str | None:
             return op_flag(a.ref, "blocked", True, "agent", a.note)
         case "reworked":
             return op_flag(a.ref, "rework", False, "agent", None)
-        case "go" | "approve" | "verified":
+        case "ready-to-try":
+            return op_ready_to_try(a.ref, a.sha, a.where)
+        case "go" | "approve" | "verified" | "try":
             return op_directive(a.ref, a.cmd, a.note)
         case "move":
             return op_move(a.ref, a.stage, a.note)

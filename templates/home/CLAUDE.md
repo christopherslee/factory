@@ -14,7 +14,7 @@ The code is in the repos that `foreman.toml` lists.
 (Describe the product, users and constraints here.)
 
 ## Verify
-(How a session puts the real artifact in front of the owner before verification: for example, install the build on the review device, or start the app and make screenshots.)
+(How a session puts the real artifact in front of the owner, for `try` and before verification. Give the commands, the device name or URL for `factory ready-to-try --where`, and the output that shows the build is ready: for example, the install command prints the bundle ID, or the server prints its URL.)
 
 ## Ship
 (What a session does after the merge to main: for example, deliver the build from the main branch. Leave empty if nothing.)
