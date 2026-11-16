@@ -6,7 +6,7 @@
 - Each skill keeps the work session inside the issue. A new idea goes into the report as a follow-up. It does not go into the work.
 - Each skill follows how the owner works: options to pick by letter, the real artifact in front of the owner before verification, and a short report that states the end state.
 - A project can have a separate project home (FACTORY-26). It is the workspace of the foreman: designs, mockups, data, tools and project skills. The code repo gets only code. The skills copy nothing from the project home into the code repo.
-- Four decisions wait for the owner. Each has a default. See "Decisions for the owner".
+- Three decisions wait for the owner. Each has a default. See "Decisions for the owner". The owner answered decision 4 in a rework note.
 
 ## Goal
 
@@ -71,12 +71,14 @@ A work session runs in a worktree of the code repo. Claude Code loads `CLAUDE.md
 
 Nothing is copied from the project home into the code repo, also not after approval. Two copies drift apart, and the project home then stops being the one source. The PR can link to the design file.
 
-One rule tells where a design is committed. It has two cases, and the skill finds the case with `git rev-parse --show-toplevel` in `home` and in the worktree:
+These rules tell where design work and spec work go, and where code work goes (owner rework note):
 
-- **The project home is in the repo of the worktree** (the factory itself, and each project without a `home` field whose code is in the folder of `foreman.toml`). The session writes to the same relative path in its worktree, not in the fixed checkout, and commits on branch `<prefix>-<N>-<slug>`. The design goes to the main branch with the code PR.
-- **The project home is a different repo.** The session writes to `designs` and `mockups` directly and commits only its own files on the default branch of that repo, then pushes. No branch and no PR are made there.
+1. **A project home is defined** (`home` in `foreman.toml` names a different repo). Design and spec work go into the project home: `designs`, `mockups` and the other folders of the project home.
+2. **The design or spec work goes into the project repo itself** (no `home` field, or `home` is in the code repo, as in the factory). The work must be on a new worktree of that repo, on branch `<prefix>-<N>-<slug>`. If the session is not in such a worktree, it creates one before it writes. It never writes in the fixed checkout. The design goes to the main branch with the code PR.
+3. **The design or spec work goes into the project home.** The session commits it directly to that repo, on its default branch, and pushes. No worktree, no branch and no PR are made there. The folder and naming conventions prevent most conflicts: each issue writes only its own files (`<designs>/<N>-<slug>.md`, `<mockups>/<N>-<slug>/`) (*Separate Before Serializing Shared State*). The stage on the board tells if a design is approved, not a branch.
+4. **Development starts and no worktree exists yet.** The `develop` session creates one: a new worktree of the code repo on branch `<prefix>-<N>-<slug>`. If a worktree for that branch exists (from rule 2), the session uses it. `git worktree list` in the code repo shows it.
 
-Reason for the second case: the next session reads `designs` from the checkout of the project home. A design on a branch of that checkout is not visible there, and two sessions cannot have two branches in one checkout. Each issue writes only its own files (`<N>-<slug>.md`, `mockups/<N>-<slug>/`), so sessions do not write the same file (*Separate Before Serializing Shared State*). The stage on the board tells if a design is approved, not the branch.
+The skill finds the case with `git rev-parse --show-toplevel` in `home` and in each code repo: the same top folder is rule 2, a different one is rules 1 and 3.
 
 ### Change to the foreman skill
 
@@ -132,7 +134,7 @@ Run the stage command, then `factory release <ID>`. If the CLI refuses, report t
    - "Decisions for the owner" is a numbered list. Each item has a default. The design uses the defaults.
    - "Out of scope" lists what the design leaves out on purpose.
    - "Proof" states what the owner will look at on the real artifact to verify the work.
-3. Commit as the rule in "Folders" tells.
+3. Write and commit as rules 1–3 in "Folders" tell: directly to the project home if one is defined, else on a new worktree of the project repo.
 4. Run `factory advance <ID>`.
 
 The owner then says `approve` (the recommendation and the defaults are accepted) or `rework` with a short note ("B, with the colors of A"; "1. yes 2. no").
@@ -140,7 +142,7 @@ The owner then says `approve` (the recommendation and the defaults are accepted)
 ### `develop`
 
 1. Read the design file in `designs` and each event after it. An owner note is stronger than the design text.
-2. Work on branch `<prefix>-<N>-<slug>` of the code repo. Merge the main branch into it first.
+2. Find the worktree of the code repo on branch `<prefix>-<N>-<slug>`. If no worktree exists yet, create one (rule 4 in "Folders"). Work only in it. Merge the main branch into it first.
 3. Build in small units. For each unit: write the behavior test, write the code, run the tests, commit. Write the test first for logic that has no user interface.
 4. Merge the main branch again. Run all the tests.
 5. Look at the full diff for secrets and private data.
@@ -165,8 +167,8 @@ The report starts with four lines: **Merged** (commit), **Tests on main** (resul
 
    | Stage | Revise |
    |---|---|
-   | In Design, Ready for Dev | The design file and the mockups, in the place and on the branch that the rule in "Folders" tells. |
-   | In Dev, Waiting for Verification | The code and the tests, on the same branch and the same PR of the code repo. If the note changes the design, also the design file. |
+   | In Design, Ready for Dev | The design file and the mockups. With a project home: commit directly to it (rule 3). Without: in the worktree of the issue, and create a new one if none exists (rule 2). |
+   | In Dev, Waiting for Verification | The code and the tests, in the worktree of the issue, on the same branch and the same PR of the code repo. If no worktree exists, create one on that branch (rule 4). If the note changes the design, also the design file, in the place that rules 1–3 tell. |
 
 2. Do only what the note says. If the note has two possible meanings, use the smaller one and state it in the report.
 3. Special notes:
@@ -234,7 +236,7 @@ For follow-ups:
 2. **Follow-ups.** Default: the report lists them and the owner says `<name> new "title"`. Alternative: the work session creates the Backlog issues.
 3. **Tests fail on main after the merge.** Default: block and wait for the owner. Alternative: the session reverts the merge commit, then blocks.
 
-4. **Design of a project with a separate project home.** Default: the design is committed on the default branch of the project home, with no branch and no PR. Alternative: a branch and a PR in the project home, and `ship` merges both PRs.
+4. **Design of a project with a separate project home.** Answered by the owner: design and spec work go into the project home and are committed directly to that repo. Folder and naming conventions prevent most conflicts. See rules 1 and 3 in "Folders".
 
 ## Out of scope
 
