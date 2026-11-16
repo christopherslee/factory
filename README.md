@@ -42,6 +42,22 @@ Set `FACTORY_FAKE=/path/state.json` to use a local JSON file in place of GitHub.
 - `foreman.toml` — config of foreman `fred` (this repo)
 
 
+## Smoke test (real GitHub)
+
+`tests/smoke.sh` tests the factory against real GitHub. It uses only the sandbox foreman `sandy`: a private repo, its own Project board and the issue "Smoke test". It never writes to a live board.
+It takes that issue through every stage (human commands with `--note 'smoke test'`), checks `factory status --json` and `factory audit` at each step, and ends in Done. It is idempotent: each run resets the same issue to Backlog first, so a second run gives the same end state.
+
+Run it when you change the GitHub backend (`GhBackend`), the hook or the skills:
+
+```
+tests/smoke.sh          # about 2 minutes; prints PASS at the end
+```
+
+It runs `bin/factory` of the checkout that holds the script (set `FACTORY` to test another CLI). It needs `gh` with the `repo` and `project` scopes, and `sandy` in the registry.
+The hook does not stop it: the hook reads only the command of the Bash call (`tests/smoke.sh`), not the commands in the script. You can run it from a worktree.
+
+To make a sandbox from zero: make a repo with a `foreman.toml` (leave out `project`), then run `factory register FOLDER` and `factory setup NAME`. `factory setup` makes the Project board (or finds an open Project with the same title) and writes `project = N` in `foreman.toml`.
+
 ## Foreman registry
 
 The registry maps each foreman name to its home repo folder. It is **not** in this repo, because it names your private projects.

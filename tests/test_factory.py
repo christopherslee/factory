@@ -204,8 +204,26 @@ class TestStatus(FactoryCase):
         self.assertEqual(self.factory("audit", "zz", ok=False),
                          "refused: \nZZ-1: in Done but the issue is open; a human must close it or move it")
 
-    def test_setup_is_a_command(self):
+    def test_setup_makes_the_board_once_and_writes_its_number(self):
+        toml = self.root / "zz-home" / "foreman.toml"
+        self.assertEqual(self.factory("setup", "zz"),
+                         "zz: the board and the flag labels are ready (Project 1 made, foreman.toml updated)")
+        self.assertEqual(toml.read_text(), 'name = "zz"\ngithub = "acme/zz-home"\n'
+                         'project = 1   # the board; `factory setup` wrote this\n'
+                         '[[repos]]\nname = "app"\npath = "../app"\n[wip]\ndesign = 1\ndev = 1\n')
         self.assertEqual(self.factory("setup", "zz"), "zz: the board and the flag labels are ready")
+        self.assertEqual(toml.read_text().count("project ="), 1)
+        repos = json.loads(self.factory("status", "zz", "--json"))["repos"]
+        self.assertEqual([r["name"] for r in repos], ["app"])
+
+    def test_setup_finds_the_board_with_the_same_title(self):
+        self.factory("setup", "zz")
+        d = self.make_foreman("yy", "acme/yy-home")
+        (d / "foreman.toml").write_text('name = "yy"\ntitle = "zz"\ngithub = "acme/yy-home"')
+        self.assertEqual(self.factory("setup", "yy"),
+                         "yy: the board and the flag labels are ready (Project 1 found, foreman.toml updated)")
+        self.assertEqual((d / "foreman.toml").read_text(), 'name = "yy"\ntitle = "zz"\ngithub = "acme/yy-home"\n'
+                         'project = 1   # the board; `factory setup` wrote this\n')
 
     def test_project_must_be_a_number(self):
         d = self.root / "zz-home"
@@ -218,7 +236,8 @@ class TestStatus(FactoryCase):
         env.pop("FACTORY_FAKE", None)
         r = subprocess.run([str(FACTORY), "status", "zz"], capture_output=True, text=True, env=env)
         self.assertEqual((r.returncode, r.stderr.strip()), (2, f"error: {self.root / 'zz-home' / 'foreman.toml'}: "
-                         "set project to the number of the GitHub Project (the board)"))
+                         "set project to the number of the GitHub Project (the board), "
+                         "or run `factory setup` to make the board"))
 
 
 class TestProjectHome(FactoryCase):
