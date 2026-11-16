@@ -107,7 +107,7 @@ class Event:
     note: str | None = None
     sha: str | None = None  # ready-to-try: the commit of the build
     where: str | None = None  # ready-to-try: the device or URL
-    at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
 
     def to_comment(self) -> str:
         data = {k: v for k, v in self.__dict__.items() if v is not None}
