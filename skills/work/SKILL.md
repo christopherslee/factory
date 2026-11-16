@@ -1,6 +1,6 @@
 ---
 name: work
-description: Do the next stage of one factory issue (design, develop, ship or rework), as `next_action` of the factory CLI names it. Use only when a factory work session brief says `/work <ID>`, or when the owner runs `/work` with a factory issue ID such as FACTORY-12.
+description: Do the next stage of one factory issue (design, develop, try, ship or rework), as `next_action` of the factory CLI names it. Use only when a factory work session brief says `/work <ID>`, or when the owner runs `/work` with a factory issue ID such as FACTORY-12.
 ---
 
 # Work
@@ -18,8 +18,9 @@ You are a work session of the software factory. Run this skill as `/work <ID>`, 
 |---|---|
 | The `rework` flag is set (any stage) | `rework` |
 | In Design | `design` |
+| In Dev or Verify, and a `try` event comes after the last `ready-to-try` event | `try` |
 | In Dev | `develop` |
-| Waiting for Verification, and a `verified` event comes after the last agent move | `ship` |
+| Verify, and a `verified` event comes after the last agent move | `ship` |
 
 5. If the `blocked` flag is set, or no row applies, change nothing, report the stage and the flags, and stop. A second start of this skill is thus safe.
 6. Do only the Steps section of that action.
@@ -70,9 +71,20 @@ The owner then says `approve` (the recommendation and the defaults are accepted)
 3. Build in small units. For each unit: write the behavior test, write the code, run the tests, commit. Write the test first for logic that has no user interface.
 4. Merge the main branch again. Run all the tests.
 5. Look at the full diff for secrets and private data.
-6. Do the `## Verify` section of `CLAUDE.md` in the project home. This section tells you how to put the real artifact in front of the owner (for example: install the build on the review device, or start the app and make screenshots). If the section is not there, use the product as a user does and keep the output as proof.
+6. Do the `## Verify` section of `CLAUDE.md` in the project home. This section tells you how to put the real artifact in front of the owner (for example: install the build on the review device, or start the app and make screenshots). If the section is not there, use the product as a user does and keep the output as proof. Then run `factory ready-to-try <ID> <sha of HEAD> --where <device or URL>` (leave out `--where` if there is no device or URL).
 7. Push the branch. Open a PR that names the issue as `Refs #<N>`. The PR body contains "What to check": three to five steps that the owner can do in two minutes, each with the expected result.
 8. Run `factory advance <ID>`.
+
+### try
+
+The owner wants to use the issue branch now. The stage does not change.
+
+1. Find the worktree of the code repo on branch `<prefix>-<N>-<slug>`. If no worktree and no branch exist, or the branch has no commits of its own, run `factory block <ID> "nothing to try yet: the branch has no commits"` and stop.
+2. In In Dev: commit the work that passes the tests. Do not merge the main branch. In Verify: merge the main branch into the branch and run all the tests.
+3. Do the `## Verify` section of `CLAUDE.md` in the project home.
+4. Run `factory ready-to-try <ID> <sha of HEAD> --where <device or URL>` (leave out `--where` if there is no device or URL).
+
+Start the report with two lines: **Ready to try** (ID, sha, device or URL) and **What to check** (the list in the PR, or "the work is not complete" in In Dev).
 
 ### ship
 
@@ -92,7 +104,7 @@ Start the report with four lines: **Merged** (commit), **Tests on main** (result
    | Stage | Revise |
    |---|---|
    | In Design, Ready for Dev | The design file and the mockups. With a project home: commit directly to it (rule 3). Without: in the worktree of the issue, and create a new one if none exists (rule 2). |
-   | In Dev, Waiting for Verification | The code and the tests, in the worktree of the issue, on the same branch and the same PR of the code repo. If no worktree exists, create one on that branch (rule 4). If the note changes the design, also the design file, in the place that rules 1–3 tell. |
+   | In Dev, Verify | The code and the tests, in the worktree of the issue, on the same branch and the same PR of the code repo. If no worktree exists, create one on that branch (rule 4). If the note changes the design, also the design file, in the place that rules 1–3 tell. |
 
 2. Do only what the note says. If the note has two possible meanings, use the smaller one and state it in the report.
 3. Special notes:
@@ -100,7 +112,7 @@ Start the report with four lines: **Merged** (commit), **Tests on main** (result
    - Numbered answers: write each answer into "Decisions for the owner" as decided.
    - "Back it out": revert the change. Keep the issue and its branch.
    - An idea "for later": write it as a follow-up. Do not build it.
-4. For code: run all the tests, push, do the `## Verify` section again, and update "What to check" in the PR.
+4. For code: run all the tests, push, do the `## Verify` section again, run `factory ready-to-try <ID> <sha of HEAD> --where <device or URL>`, and update "What to check" in the PR.
 5. Run `factory reworked <ID>`. The stage does not change.
 
 In the report, give one line for each item of the note: what it was before, and what it is now.

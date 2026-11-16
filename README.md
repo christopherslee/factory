@@ -16,13 +16,15 @@ factory foremen                # registered foremen
 factory register FOLDER        # add a home repo folder to the registry
 factory status [foreman]       # issues by stage, and what the tick must start (--json)
 factory go|approve|verified REF    # human directives
+factory try REF                # human: make the issue branch ready to try (In Dev or Verify); no stage change
 factory move REF STAGE         # human: any stage
 factory rework REF "note"      # human: ask for a revision
 factory advance REF            # agent: one stage forward, if the rule permits
 factory claim REF SESSION | release REF | block REF "question" | reworked REF
+factory ready-to-try REF SHA [--where DEVICE_OR_URL]   # agent: record the build that the owner can try now
 factory new "title" [--foreman cc]
 factory audit [foreman]        # find illegal states
-factory setup [foreman]        # make the Project board and the flag labels ready
+factory setup [foreman]        # make the Project board and the flag labels ready; renames old Status options
 factory hook                   # Claude Code PreToolUse guard (hooks/hooks.json)
 ```
 
@@ -38,7 +40,7 @@ Set `FACTORY_FAKE=/path/state.json` to use a local JSON file in place of GitHub.
 - `bin/install-skills` — pull the fixed `main` checkout and link its skills into `~/.claude/skills/`
 - `hooks/hooks.json` — runs `factory hook` before each Bash call: stops direct writes of the Project board and of `factory:*` state, and stops human commands in work sessions (design: `docs/designs/2-hooks.md`)
 - `skills/foreman/` — the skill that runs an owner directive such as `fred go 4`: records it, does the work in the same session and reports (design: `docs/designs/4-foreman-skill.md`)
-- `skills/work/` — the skill that a work session runs (`/work ID`): it does the stage that `next_action` names, `design`, `develop`, `ship` or `rework` (design: `docs/designs/12-stage-skills.md`)
+- `skills/work/` — the skill that a work session runs (`/work ID`): it does the stage that `next_action` names, `design`, `develop`, `try`, `ship` or `rework` (design: `docs/designs/12-stage-skills.md`)
 - `tests/` — behavior tests (`python3 -m unittest discover -s tests -v`)
 - `templates/home/` — template for a new foreman home repo
 - `foreman.toml` — config of foreman `fred` (this repo)

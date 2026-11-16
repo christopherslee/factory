@@ -30,7 +30,7 @@ def cli_actions():
     actions = {cli.next_action(stage, flags, events)
                for stage in cli.STAGE
                for flags in ([], ["rework"], ["claimed"], ["blocked"])
-               for events in ([], verified)}
+               for events in ([], verified, [cli.Event("human", "try")])}
     actions.discard(None)
     return actions
 
@@ -40,7 +40,7 @@ class WorkSkillTest(unittest.TestCase):
         text = read_skill("work")
         steps = re.search(r"^## Steps\n(.*?)(?=^## |\Z)", text, re.S | re.M).group(1)
         sections = set(re.findall(r"^### (\w+)$", steps, re.M))
-        self.assertEqual(cli_actions(), {"design", "develop", "ship", "rework"})
+        self.assertEqual(cli_actions(), {"design", "develop", "try", "ship", "rework"})
         self.assertEqual(sections, cli_actions())
 
     def test_each_next_action_is_in_the_action_table(self):

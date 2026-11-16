@@ -84,19 +84,30 @@ refused advance "$REF"
 step "Ready for Dev -> In Dev (human approve), block and unblock, then agent advance"
 run approve "$REF" --note "$NOTE"
 expect dev - develop
+run try "$REF" --note "$NOTE"
+expect dev - try
+run ready-to-try "$REF" 1111111 --where "smoke test"
+expect dev - develop
 run claim "$REF" "$SESSION"
 run block "$REF" "Smoke test question"
 expect dev claimed,blocked -
 run unblock "$REF" --note "$NOTE"
+run ready-to-try "$REF" 2222222
 run advance "$REF" --session "$SESSION"
 refused advance "$REF"
 run release "$REF"
 expect verify - -
 
-step "Waiting for Verification: rework, then verified, then agent advance to Done"
+step "Verify: rework, try, then verified, then agent advance to Done"
 run rework "$REF" "$NOTE"
 expect verify rework rework
 run reworked "$REF"
+run ready-to-try "$REF" 3333333
+refused advance "$REF"
+run try "$REF" --note "$NOTE"
+expect verify - try
+run ready-to-try "$REF" 4444444
+expect verify - -
 refused advance "$REF"
 run verified "$REF" --note "$NOTE"
 expect verify - ship
