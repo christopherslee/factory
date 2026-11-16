@@ -254,7 +254,7 @@ For follow-ups:
 - With a separate project home, a design is on the default branch of that repo before the owner approves it. The stage on the board is the only sign that it is approved.
 - With a separate project home, two sessions can commit in one checkout at the same time. They write different files, but one `git commit` or `git push` can fail and must be tried again.
 - The path with a separate project home is tested only with the first such project.
-- The Start block loads project skills by an instruction, so a session can skip one. The `develop` session must test if `claude --add-dir <home>` also loads `<home>/.claude/skills/`. If it does, the foreman skill can start each work session with that option, and the instruction becomes a fallback.
+- The Start block loads project skills by an instruction, so a session can skip one. Test result in the `develop` session (Claude Code CLI 2.1): `claude -p "..." --add-dir <home>` lists the skills of `<home>/.claude/skills/`, and the same run without `--add-dir` does not. Thus a work session that starts with the project home as an added folder gets the project skills automatically. The foreman skill does not do this yet, because the app tool that starts a session must accept an added folder. Until then the instruction stays.
 - The mockups of a private project are in its private project home. The skills never copy them into this repo.
 
 ## Proof
