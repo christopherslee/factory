@@ -8,6 +8,13 @@ The code is in the repos that `foreman.toml` lists.
 - Change stages only with the `factory` CLI. Never edit the Project board or the `factory:*` labels directly.
 - An agent can make one forward move after each human event. If `factory advance` refuses, stop and report.
 - Designs go in `docs/designs/<number>-<slug>.md` and mockups go in `mockups/` of the project home: the `home` folder in `foreman.toml`, or this folder when `home` is not set. Data goes in `data/`.
+- The project home is the workspace of the foreman: `docs/designs/`, `mockups/`, `data/`, `bin/` (tools), `.claude/skills/` (project skills). Code repos get only code.
 
 ## Project context
 (Describe the product, users and constraints here.)
+
+## Verify
+(How a session puts the real artifact in front of the owner before verification: for example, install the build on the review device, or start the app and make screenshots.)
+
+## Ship
+(What a session does after the merge to main: for example, deliver the build from the main branch. Leave empty if nothing.)
