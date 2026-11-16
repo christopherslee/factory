@@ -363,7 +363,7 @@ def resolve(text: str) -> tuple[Foreman, int]:
 class GhBackend:
     """GitHub through the `gh` CLI. The Status field of the Project holds the stage; labels hold the flags."""
 
-    def __init__(self, repo: str, project: int):
+    def __init__(self, repo: str, project: int | None):
         self.repo, self.number = repo, project
         self.owner, self.name = repo.split("/")
         self._board: dict | None = None
@@ -405,6 +405,16 @@ class GhBackend:
                            "repos": [r["nameWithOwner"] for r in pr["repositories"]["nodes"]]}
         return self._board
 
+    def make_project(self, title: str) -> tuple[int, bool]:
+        """The open Project of the owner with this title, or a new one. Returns (number, made)."""
+        data = self._gql("""query($owner:String!){ repositoryOwner(login:$owner){ id ... on ProjectV2Owner {
+            projectsV2(first:100){ nodes { number title closed } } } } }""", owner=self.owner)["repositoryOwner"]
+        found = [p["number"] for p in data["projectsV2"]["nodes"] if p["title"] == title and not p["closed"]]
+        if found:
+            return min(found), False
+        return self._gql("""mutation($owner:ID!,$title:String!){ createProjectV2(input:{ownerId:$owner,title:$title}){
+            projectV2 { number } } }""", owner=data["id"], title=title)["createProjectV2"]["projectV2"]["number"], True
+
     def issue(self, n: int) -> dict:
         data = self._gql("""query($owner:String!,$name:String!,$n:Int!){ repository(owner:$owner,name:$name){
             issue(number:$n){ id title state labels(first:50){ nodes { name } }
@@ -425,8 +435,16 @@ class GhBackend:
         return [c["body"] for page in pages for c in page]
 
     def open_issues(self) -> list[int]:
-        pages = self._api("issues?state=open&per_page=100", paginate=True)
-        return [i["number"] for page in pages for i in page if "pull_request" not in i]
+        """GraphQL, not the REST list: the REST list can lag behind a close or a reopen for some seconds."""
+        numbers, cursor = [], {}
+        while True:
+            page = self._gql("""query($owner:String!,$name:String!,$after:String){ repository(owner:$owner,name:$name){
+                issues(states:OPEN,first:100,after:$after){ pageInfo { hasNextPage endCursor } nodes { number } } } }""",
+                             owner=self.owner, name=self.name, **cursor)["repository"]["issues"]
+            numbers += [i["number"] for i in page["nodes"]]
+            if not page["pageInfo"]["hasNextPage"]:
+                return sorted(numbers)
+            cursor = {"after": page["pageInfo"]["endCursor"]}
 
     def set_stage(self, n: int, stage: str) -> None:
         """Put the issue on the board (no change if it is there) and set its Status."""
@@ -564,15 +582,29 @@ class FakeBackend:
     def setup(self) -> list[str]:
         return []
 
+    def make_project(self, title: str) -> tuple[int, bool]:
+        def find_or_add(db):
+            projects = db.setdefault(self.repo.split("/")[0], {}).setdefault("projects", [])
+            if title in projects:
+                return projects.index(title) + 1, False
+            projects.append(title)
+            return len(projects), True
+        db = self._load()
+        result = find_or_add(db)
+        self.path.write_text(json.dumps(db, indent=2))
+        return result
 
-def backend_for(f: Foreman):
+
+def backend_for(f: Foreman, board: bool = True):
+    """board=False: the Project may not exist yet (only `factory setup` makes it)."""
     fake = os.environ.get("FACTORY_FAKE")
     if fake:
         return FakeBackend(f.github, Path(fake))
     if f.github.startswith("OWNER/"):
         raise UsageError(f"{f.root / 'foreman.toml'}: set github to the real owner/repo")
-    if f.project is None:
-        raise UsageError(f"{f.root / 'foreman.toml'}: set project to the number of the GitHub Project (the board)")
+    if f.project is None and board:
+        raise UsageError(f"{f.root / 'foreman.toml'}: set project to the number of the GitHub Project (the board), "
+                         "or run `factory setup` to make the board")
     return GhBackend(f.github, f.project)
 
 
@@ -744,9 +776,25 @@ def op_audit(foreman: str | None) -> list[str]:
     return problems
 
 
+def write_project_number(path: Path, number: int) -> None:
+    """Add `project = N` to foreman.toml, above the first table, so that it is a top-level key."""
+    lines = path.read_text().splitlines(keepends=True)
+    at = next((i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
+    if at and not lines[at - 1].endswith("\n"):
+        lines[at - 1] += "\n"
+    lines.insert(at, f"project = {number}   # the board; `factory setup` wrote this\n")
+    path.write_text("".join(lines))
+
+
 def op_setup(foreman: str | None) -> str:
     f = get_foreman(foreman)
-    done = backend_for(f).setup()
+    done = []
+    if f.project is None:
+        number, made = backend_for(f, board=False).make_project(f.title)
+        write_project_number(f.root / "foreman.toml", number)
+        done.append(f"Project {number} {'made' if made else 'found'}, foreman.toml updated")
+        f = load_foreman(f.root / "foreman.toml")
+    done += backend_for(f).setup()
     return f"{f.name}: the board and the flag labels are ready" + (f" ({', '.join(done)})" if done else "")
 
 
