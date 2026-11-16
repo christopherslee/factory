@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Update the fixed main checkout and link its skills into the skills folder of Claude Code.
+# Run it from any checkout or worktree of this repo. It always links from the main checkout
+# (the first entry of `git worktree list`), never from a worktree. Idempotent.
+# SKILLS_DIR overrides the target folder (default: ~/.claude/skills).
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")/.." && pwd)"
+main="$(git -C "$here" worktree list --porcelain | sed -n '1s/^worktree //p')"
+target="${SKILLS_DIR:-$HOME/.claude/skills}"
+
+branch="$(git -C "$main" branch --show-current)"
+if [ "$branch" != "main" ]; then
+  echo "install-skills: $main is on branch '$branch', not main; nothing changed" >&2
+  exit 1
+fi
+if [ -n "$(git -C "$main" status --porcelain)" ]; then
+  echo "install-skills: $main has uncommitted changes; nothing changed" >&2
+  exit 1
+fi
+if git -C "$main" remote get-url origin >/dev/null 2>&1; then
+  git -C "$main" pull -q --ff-only origin main
+fi
+
+mkdir -p "$target"
+# Remove links into this checkout whose skill folder no longer exists.
+for link in "$target"/*; do
+  [ -L "$link" ] || continue
+  dest="$(readlink "$link")"
+  case "$dest" in "$main"/skills/*) [ -d "$dest" ] || { rm "$link"; echo "removed $(basename "$link")"; } ;; esac
+done
+for dir in "$main"/skills/*/; do
+  name="$(basename "$dir")"
+  ln -sfn "$main/skills/$name" "$target/$name"
+  echo "linked $name -> $main/skills/$name"
+done
