@@ -4,6 +4,7 @@ title = "{{title}}"
 # prefix = "{{name}}"        # optional: issue IDs start with this in place of the name
 project = 1                 # number of the GitHub Project (the board) of the same owner; then run `factory setup`
 github = "{{owner}}/{{name}}-home"   # issue tracker (this home repo)
+# home = "../{{name}}-project"   # optional: project home for designs (docs/designs/) and mockups (mockups/). Default: this folder.
 
 # Code repos this foreman works on. Paths are relative to this file.
 [[repos]]

@@ -56,14 +56,16 @@ If this turn started from a session event, do not start sessions. Propose them t
 
 ### Briefs
 
-Start each brief with: "You are the work session for `<ID>` (`<title>`). Run `factory show <ID>` and read `CLAUDE.md` in the home repo `<home folder>`. Do only this issue. Never run `factory go|approve|verified|move|rework|unblock`. If you need an answer from the owner, run `factory block <ID> \"question\"` and stop."
+Take the folders from `factory status <name> --json`: `root` is the folder of `foreman.toml`, `home` is the project home, `designs` and `mockups` are the folders for designs and mockups in the project home. When `foreman.toml` has no `home` field, `home` is the same as `root`.
+
+Start each brief with: "You are the work session for `<ID>` (`<title>`). Run `factory show <ID>` and read `CLAUDE.md` in `<root>` and in the project home `<home>`. Write designs only in `<designs>` and mockups only in `<mockups>`. Do only this issue. Never run `factory go|approve|verified|move|rework|unblock`. If you need an answer from the owner, run `factory block <ID> \"question\"` and stop."
 
 Then add the part for `next_action`:
 
 | `next_action` | Brief |
 |---|---|
-| `design` | Write the design in `docs/designs/<N>-<slug>.md` of the home repo: goal, design, options that were compared, limits, proof. Commit it on branch `<prefix>-<N>-<slug>`. Then run `factory advance <ID>` and `factory release <ID>`. |
-| `develop` | Read the design. Build it on branch `<prefix>-<N>-<slug>` with behavior tests. Run all the tests. Push the branch and open a PR that names the issue as `Refs #<N>`. Never write `Closes`, `Fixes` or `Resolves` with an issue number in a PR or a commit message: only `factory advance` closes an issue. Then run `factory advance <ID>` and `factory release <ID>`. |
+| `design` | Write the design in `<designs>/<N>-<slug>.md`: goal, design, options that were compared, limits, proof. Commit it on branch `<prefix>-<N>-<slug>` of the project home repo. Then run `factory advance <ID>` and `factory release <ID>`. |
+| `develop` | Read the design in `<designs>`. Build it on branch `<prefix>-<N>-<slug>` with behavior tests. Run all the tests. Push the branch and open a PR that names the issue as `Refs #<N>`. Never write `Closes`, `Fixes` or `Resolves` with an issue number in a PR or a commit message: only `factory advance` closes an issue. Then run `factory advance <ID>` and `factory release <ID>`. |
 | `ship` | Merge the PR. Run the tests on `main`. If they pass, run `factory advance <ID>` and `factory release <ID>`. If they fail, run `factory block <ID> "the tests fail on main: <summary>"`. |
 | `rework` | Run `factory show <ID>` and read the last `rework` note. Revise the work. Then run `factory reworked <ID>` and `factory release <ID>`. |
 

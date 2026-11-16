@@ -225,7 +225,8 @@ class Foreman:
     title: str
     github: str  # owner/repo of the issue tracker (the home repo)
     project: int | None  # number of the GitHub Project (the board) of the same owner
-    root: Path  # folder that holds foreman.toml
+    root: Path  # folder that holds foreman.toml (the registry folder)
+    home: Path  # project home: designs, mockups and delivery docs. Default: root.
     repos: list[dict]
     wip: dict[str, int]
 
@@ -251,11 +252,17 @@ def load_foreman(path: Path) -> Foreman:
     if project is not None and (not isinstance(project, int) or isinstance(project, bool) or project < 1):
         raise UsageError(f"{path}: project must be the number of a GitHub Project, got {project!r}")
     root = path.parent.resolve()
+    home = data.get("home", ".")
+    if not isinstance(home, str) or not home:
+        raise UsageError(f"{path}: home must be the path of the project home folder, got {home!r}")
+    home = (root / Path(home).expanduser()).resolve()
+    if not home.is_dir():
+        raise UsageError(f"{path}: home {str(home)!r} is not a folder")
     repos = []
     for r in data.get("repos", []):
         repos.append({**r, "path": str((root / r.get("path", ".")).resolve())})
     wip = {"design": 2, "dev": 3, **data.get("wip", {})}
-    return Foreman(name, prefix, data.get("title", name), github, project, root, repos, wip)
+    return Foreman(name, prefix, data.get("title", name), github, project, root, home, repos, wip)
 
 
 def registry_path() -> Path:
@@ -713,7 +720,9 @@ def op_status(foreman: str | None) -> dict:
     f = get_foreman(foreman)
     be = backend_for(f)
     issues = [issue_summary(read(f, n, be)) for n in be.open_issues()]
-    return {"foreman": f.name, "github": f.github, "repos": f.repos, "wip": f.wip,
+    return {"foreman": f.name, "github": f.github, "root": str(f.root), "home": str(f.home),
+            "designs": str(f.home / "docs" / "designs"), "mockups": str(f.home / "mockups"),
+            "repos": f.repos, "wip": f.wip,
             "issues": issues, "start": plan_starts(issues, f.wip)}
 
 
@@ -748,6 +757,8 @@ def op_setup(foreman: str | None) -> str:
 
 def format_status(st: dict) -> str:
     lines = [f"{st['foreman']} ({st['github']})"]
+    if st["home"] != st["root"]:
+        lines.append(f"project home: {st['home']}")
     by_stage: dict[str | None, list[dict]] = {}
     for i in st["issues"]:
         by_stage.setdefault(i["stage"], []).append(i)
