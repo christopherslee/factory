@@ -37,10 +37,19 @@ Set `FACTORY_FAKE=/path/state.json` to use a local JSON file in place of GitHub.
 - `bin/factory` — CLI; all stage rules are in this file
 - `hooks/hooks.json` — runs `factory hook` before each Bash call: stops direct writes of the Project board and of `factory:*` state, and stops human commands in work sessions (design: `docs/designs/2-hooks.md`)
 - `skills/foreman/` — the skill that runs an owner directive such as `fred go 4`: records it, starts the work sessions and reports (design: `docs/designs/4-foreman-skill.md`)
+- `skills/work/` — the skill that a work session runs (`/work ID`): it does the stage that `next_action` names, `design`, `develop`, `ship` or `rework` (design: `docs/designs/12-stage-skills.md`)
 - `tests/` — behavior tests (`python3 -m unittest discover -s tests -v`)
 - `templates/home/` — template for a new foreman home repo
 - `foreman.toml` — config of foreman `fred` (this repo)
 
+
+## Install the skills
+
+Link each skill folder of the fixed `main` checkout into `~/.claude/skills/`:
+
+```
+for s in foreman work; do ln -sfn ~/projects/factory/skills/$s ~/.claude/skills/$s; done
+```
 
 ## Smoke test (real GitHub)
 
