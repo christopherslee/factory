@@ -220,6 +220,41 @@ class TestStatus(FactoryCase):
         self.assertEqual((r.returncode, r.stderr.strip()), (2, f"error: {self.root / 'zz-home' / 'foreman.toml'}: "
                          "set project to the number of the GitHub Project (the board)"))
 
+
+class TestProjectHome(FactoryCase):
+    def write_home(self, line):
+        d = self.root / "zz-home"
+        (d / "foreman.toml").write_text(f'name = "zz"\ngithub = "acme/zz-home"\n{line}\n')
+        return d
+
+    def test_without_home_the_registry_folder_is_the_home(self):
+        d = self.root / "zz-home"
+        st = json.loads(self.factory("status", "zz", "--json"))
+        self.assertEqual((st["root"], st["home"], st["designs"], st["mockups"]),
+                         (str(d), str(d), str(d / "docs" / "designs"), str(d / "mockups")))
+        self.assertNotIn("project home", self.factory("status", "zz"))
+
+    def test_home_names_a_separate_project_home(self):
+        (self.root / "zz-project").mkdir()
+        d = self.write_home('home = "../zz-project"')
+        st = json.loads(self.factory("status", "zz", "--json"))
+        p = self.root / "zz-project"
+        self.assertEqual((st["root"], st["home"], st["designs"], st["mockups"]),
+                         (str(d), str(p), str(p / "docs" / "designs"), str(p / "mockups")))
+        self.assertEqual(self.factory("status", "zz").splitlines()[:2],
+                         ["zz (acme/zz-home)", f"project home: {p}"])
+
+    def test_home_must_be_an_existing_folder(self):
+        d = self.write_home('home = "../nowhere"')
+        self.assertEqual(self.factory("status", "zz", ok=None),
+                         f"error: {d / 'foreman.toml'}: home '{self.root / 'nowhere'}' is not a folder")
+
+    def test_home_must_be_a_path(self):
+        d = self.write_home("home = 3")
+        self.assertEqual(self.factory("status", "zz", ok=None),
+                         f"error: {d / 'foreman.toml'}: home must be the path of the project home folder, got 3")
+
+
 class TestRefs(FactoryCase):
     def test_all_reference_forms_resolve_to_one_id(self):
         self.make_foreman("cc", "acme/cc-home")
