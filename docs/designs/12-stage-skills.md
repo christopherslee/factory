@@ -5,7 +5,8 @@
 - Four skills replace the four briefs in the foreman skill: `design`, `develop`, `ship`, `rework`. Each skill name is equal to a `next_action` value of the CLI.
 - Each skill keeps the work session inside the issue. A new idea goes into the report as a follow-up. It does not go into the work.
 - Each skill follows how the owner works: options to pick by letter, the real artifact in front of the owner before verification, and a short report that states the end state.
-- Three decisions wait for the owner. Each has a default. See "Decisions for the owner".
+- A project can have a separate project home (FACTORY-26). The skills take each folder from `factory status --json` and contain no fixed path.
+- Four decisions wait for the owner. Each has a default. See "Decisions for the owner".
 
 ## Goal
 
@@ -50,13 +51,31 @@ The name of each skill is the `next_action` value that `factory status` prints. 
 
 Each skill takes one argument: the issue ID (`/design FACTORY-12`).
 
+### Folders
+
+A project can have three different places (FACTORY-26). No skill contains a fixed path. Each skill takes the folders from `factory status <foreman> --json`:
+
+| Field | What it is | What a skill does there |
+|---|---|---|
+| `root` | The folder of `foreman.toml`. Its GitHub repo holds the issues. | Reads `CLAUDE.md`. |
+| `home` | The project home. The default is `root`. | Reads `CLAUDE.md` (with `## Verify` and `## Ship`). |
+| `designs`, `mockups` | Folders in the project home. | `design` and `rework` write here. `develop` reads here. |
+| `repos[].path` | The code repos. | `develop`, `ship` and `rework` change code here, in the worktree of the session. |
+
+One rule tells where a design is committed. It has two cases, and the skill finds the case with `git rev-parse --show-toplevel` in `home` and in the worktree:
+
+- **The project home is in the repo of the worktree** (the factory itself, and each project without a `home` field whose code is in the folder of `foreman.toml`). The session writes to the same relative path in its worktree, not in the fixed checkout, and commits on branch `<prefix>-<N>-<slug>`. The design goes to the main branch with the code PR.
+- **The project home is a different repo.** The session writes to `designs` and `mockups` directly and commits only its own files on the default branch of that repo, then pushes. No branch and no PR are made there.
+
+Reason for the second case: the next session reads `designs` from the checkout of the project home. A design on a branch of that checkout is not visible there, and two sessions cannot have two branches in one checkout. Each issue writes only its own files (`<N>-<slug>.md`, `mockups/<N>-<slug>/`), so sessions do not write the same file (*Separate Before Serializing Shared State*). The stage on the board tells if a design is approved, not the branch.
+
 ### Change to the foreman skill
 
 The table of four briefs is deleted (*Subtract Before You Add*). The brief of a work session becomes:
 
-> You are the work session for `<ID>` (`<title>`). The home repo is `<home folder>`. Run the skill `/<next_action> <ID>`. Do only this issue.
+> You are the work session for `<ID>` (`<title>`) of foreman `<name>`. Run the skill `/<next_action> <ID>`. Do only this issue.
 
-The other rules of the old brief (never run a human command, `factory block` for a question, the form of the report) move into the skills.
+The other rules of the brief on `main` (the folders, never run a human command, `factory block` for a question, the form of the report) move into the skills. The paragraph that tells the foreman session to take the folders from `factory status` is also deleted from the foreman skill: the skills do this.
 
 ### Common part of each skill
 
@@ -64,13 +83,13 @@ Each skill has the same three blocks. A test makes sure that the text of these b
 
 **Start**
 
-1. Run `factory show <ID>`. Read `CLAUDE.md` in the home repo.
+1. Run `factory show <ID>` and `factory status <foreman> --json`. Take `root`, `home`, `designs`, `mockups` and `repos` from the output. Read `CLAUDE.md` in `root`, and in `home` if it is a different folder.
 2. Check the precondition of the skill (table below). If it is not true, change nothing, report, and stop. A second start of the same skill is thus safe (*Make Operations Idempotent*).
 
 | Skill | Precondition |
 |---|---|
 | `design` | The stage is In Design. The `rework` flag is not set. |
-| `develop` | The stage is In Dev. The `rework` flag is not set. A design file is there. |
+| `develop` | The stage is In Dev. The `rework` flag is not set. The file `<designs>/<N>-*.md` is there. |
 | `ship` | The stage is Waiting for Verification. A `verified` event comes after the last agent move. |
 | `rework` | The `rework` flag is set. |
 
@@ -79,6 +98,7 @@ Each skill has the same three blocks. A test makes sure that the text of these b
 - Do only what the issue asks (for `rework`: only what the note asks). When you find a different idea, a different defect or a possible improvement, do not build it and do not design it. Write it in the report below "Follow-ups", as a possible issue title.
 - Never run `factory go|approve|verified|move|rework|unblock`. Do not run `factory new`: the owner decides what goes into the backlog.
 - When a question has no answer in the issue, select the simplest option, write the decision down, and continue. Run `factory block <ID> "question"` and stop only if the decision is hard to undo.
+- Write designs only in `designs` and mockups only in `mockups`. Change code only in the worktree of the session.
 - Never write details of a different project in this repo, its issues or its PRs.
 - Never write `Closes`, `Fixes` or `Resolves` with an issue number.
 
@@ -95,25 +115,25 @@ Run the stage command, then `factory release <ID>`. If the CLI refuses, report t
 ### `design`
 
 1. Decide if the issue changes something that a user sees.
-   - **Yes:** make 2–3 mockup images, labeled A, B and C, in `mockups/<N>-<slug>/` of the home repo. Recommend one.
+   - **Yes:** make 2–3 mockup images, labeled A, B and C, in `<mockups>/<N>-<slug>/`. Recommend one.
    - **No:** compare 2–3 approaches in a table. Recommend one.
-2. Write `docs/designs/<N>-<slug>.md` with these sections: summary (five lines maximum), goal, design, options that were compared, decisions for the owner, out of scope, limits, proof.
+2. Write `<designs>/<N>-<slug>.md` with these sections: summary (five lines maximum), goal, design, options that were compared, decisions for the owner, out of scope, limits, proof.
    - "Decisions for the owner" is a numbered list. Each item has a default. The design uses the defaults.
    - "Out of scope" lists what the design leaves out on purpose.
    - "Proof" states what the owner will look at on the real artifact to verify the work.
-3. Commit on branch `<prefix>-<N>-<slug>`.
+3. Commit as the rule in "Folders" tells.
 4. Run `factory advance <ID>`.
 
 The owner then says `approve` (the recommendation and the defaults are accepted) or `rework` with a short note ("B, with the colors of A"; "1. yes 2. no").
 
 ### `develop`
 
-1. Read the design file and each event after it. An owner note is stronger than the design text.
-2. Work on branch `<prefix>-<N>-<slug>`. Merge the main branch into it first.
+1. Read the design file in `designs` and each event after it. An owner note is stronger than the design text.
+2. Work on branch `<prefix>-<N>-<slug>` of the code repo. Merge the main branch into it first.
 3. Build in small units. For each unit: write the behavior test, write the code, run the tests, commit. Write the test first for logic that has no user interface.
 4. Merge the main branch again. Run all the tests.
 5. Look at the full diff for secrets and private data.
-6. Do the `## Verify` section of the home repo `CLAUDE.md`. This section tells the session how to put the real artifact in front of the owner (for example: install the build on the review device, or start the app and make screenshots). If the section is not there, use the product as a user does and keep the output as proof.
+6. Do the `## Verify` section of `CLAUDE.md` in the project home. This section tells the session how to put the real artifact in front of the owner (for example: install the build on the review device, or start the app and make screenshots). If the section is not there, use the product as a user does and keep the output as proof.
 7. Push the branch. Open a PR that names the issue as `Refs #<N>`. The PR body contains "What to check": three to five steps that the owner can do in two minutes, each with the expected result.
 8. Run `factory advance <ID>`.
 
@@ -123,7 +143,7 @@ The owner then says `approve` (the recommendation and the defaults are accepted)
 2. Run all the tests on the branch.
 3. Merge the PR. Delete the branch on the remote.
 4. Run all the tests on the main branch. If they fail, run `factory block <ID> "the tests fail on main: <summary>"` and stop. Do not revert without the owner.
-5. Do the `## Ship` section of the home repo `CLAUDE.md`, if it is there (for example: deliver the build from the main branch).
+5. Do the `## Ship` section of `CLAUDE.md` in the project home, if it is there (for example: deliver the build from the main branch).
 6. Run `factory advance <ID>`. This closes the issue.
 
 The report starts with four lines: **Merged** (commit), **Tests on main** (result), **Issue** (closed or open), **Stage**.
@@ -134,8 +154,8 @@ The report starts with four lines: **Merged** (commit), **Tests on main** (resul
 
    | Stage | Revise |
    |---|---|
-   | In Design, Ready for Dev | The design file and the mockups. |
-   | In Dev, Waiting for Verification | The code and the tests, on the same branch and the same PR. |
+   | In Design, Ready for Dev | The design file and the mockups, in the place and on the branch that the rule in "Folders" tells. |
+   | In Dev, Waiting for Verification | The code and the tests, on the same branch and the same PR of the code repo. If the note changes the design, also the design file. |
 
 2. Do only what the note says. If the note has two possible meanings, use the smaller one and state it in the report.
 3. Special notes:
@@ -150,7 +170,7 @@ The report gives one line for each item of the note: what it was before, and wha
 
 ### Change to the home template
 
-`templates/home/CLAUDE.md` gets two empty sections, `## Verify` and `## Ship`, each with one line that explains its purpose. The private details of a project (devices, commands, accounts) stay in the home repo of that project. The skills contain none.
+`templates/home/CLAUDE.md` gets two empty sections, `## Verify` and `## Ship`, each with one line that explains its purpose. A project with a separate project home puts these two sections in the `CLAUDE.md` of the project home. The private details of a project (devices, commands, accounts) stay in the repos of that project. The skills contain none.
 
 ### Installation
 
@@ -165,6 +185,23 @@ The report gives one line for each item of the note: what it was before, and wha
 | C. Keep the briefs in the foreman skill and make them longer | Not selected. The foreman session carries all the text in each directive turn, and the owner cannot run a stage directly. |
 | D. A shared rules file that the four skills refer to | Not selected. A session can fail to read the second file. Repeated text plus a test is more reliable (*Minimize Reader Load*). |
 
+For the design of a project with a separate project home:
+
+| Option | Result |
+|---|---|
+| Commit on the default branch of the project home | **Selected.** The design is at one fixed path for the owner and for the next session. |
+| A branch in the project home (the brief on `main` says this) | Not selected. The `develop` session reads `designs` from the checkout and does not find the design. Nothing merges the branch. |
+| A branch and a PR in the project home, and `ship` merges two PRs | Not selected. Two merges for one issue, and the owner must look in two places. |
+| Keep each design in the code repo | Not selected. This removes what FACTORY-26 added. |
+
+For the source of the folders:
+
+| Option | Result |
+|---|---|
+| The skill reads `factory status <foreman> --json` | **Selected.** One source, no CLI change, and the owner can run a skill directly. |
+| The foreman session writes the folders into each brief | Not selected. The paths are then in two places, and a skill that the owner starts has none. |
+| `factory show` prints the folders | Not selected now. It is a CLI change, and this issue makes none. |
+
 For follow-ups:
 
 | Option | Result |
@@ -177,6 +214,8 @@ For follow-ups:
 1. **Skill names.** Default: `design`, `develop`, `ship`, `rework`, as the issue says. The risk: the owner says "ship it" in sessions that are not factory sessions, and a global skill named `ship` can start there. The precondition check stops it with no change. Alternative: `factory-design`, `factory-develop`, `factory-ship`, `factory-rework`.
 2. **Follow-ups.** Default: the report lists them and the owner says `<name> new "title"`. Alternative: the work session creates the Backlog issues.
 3. **Tests fail on main after the merge.** Default: block and wait for the owner. Alternative: the session reverts the merge commit, then blocks.
+
+4. **Design of a project with a separate project home.** Default: the design is committed on the default branch of the project home, with no branch and no PR. Alternative: a branch and a PR in the project home, and `ship` merges both PRs.
 
 ## Out of scope
 
@@ -191,8 +230,10 @@ For follow-ups:
 - The scope rule is an instruction, not a check. The proof below shows if it holds for one issue. If a session adds scope again, the next step is a check of the diff against the design file.
 - The quality of the delivery step depends on the `## Verify` section of each project. An empty section gives a weaker proof.
 - A skill that is linked into `~/.claude/skills/` is visible in all sessions of the owner, also outside the factory. See decision 1.
-- A work session of a project whose code repo is not the home repo must write the design in the home repo and the code in the code repo. The skills name the home repo for each file, but this is tested only with the first such project.
-- The mockups of a private project are in its private home repo. The skills never copy them into this repo.
+- With a separate project home, a design is on the default branch of that repo before the owner approves it. The stage on the board is the only sign that it is approved.
+- With a separate project home, two sessions can commit in one checkout at the same time. They write different files, but one `git commit` or `git push` can fail and must be tried again.
+- The path with a separate project home is tested only with the first such project.
+- The mockups of a private project are in its private project home. The skills never copy them into this repo.
 
 ## Proof
 
@@ -200,4 +241,6 @@ For follow-ups:
    - For each `next_action` value that the CLI can print, `skills/<value>/SKILL.md` is there and its `name` is equal to the value.
    - The Rules block is the same text in the four skills.
    - The foreman skill does not contain the old brief table.
+   - No skill contains the text `home repo` or a path that starts with `docs/designs` or `mockups/`: each path comes from the `designs` and `mockups` fields.
 2. **Real run:** after this issue is shipped, one new issue goes from Backlog to Done. Its events show a `design` session, a `develop` session and a `ship` session, and one `rework` round. Each session report names the skill that it ran. The diff of that issue contains nothing that the issue did not ask for.
+3. **Separate project home:** the first issue of a project with a `home` field has its design file in `designs` on the default branch of the project home, and its code PR contains no design file.
